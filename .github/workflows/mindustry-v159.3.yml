@@ -60,7 +60,9 @@ jobs:
         run: |
           archive="${RUNNER_TEMP}/plague-server-v159.3-${GITHUB_SHA::12}.tar.zst"
           docker save "${{ steps.image.outputs.tag }}" | zstd --threads=0 --no-progress -19 -o "$archive"
-          sha256sum "$archive" >"$archive.sha256"
+          archive_dir=$(dirname "$archive")
+          archive_name=$(basename "$archive")
+          (cd "$archive_dir" && sha256sum "$archive_name" >"$archive_name.sha256")
           cat "$archive.sha256"
 
       - name: Upload image smoke-test log
