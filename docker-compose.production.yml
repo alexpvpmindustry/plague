@@ -12,6 +12,7 @@ services:
       - "6567:6567/udp"
     volumes:
       - ./prod/runtime-config/:/app/config/
+      - ./prod/runtime-dumps/:/app/dumps/
       - ./prod/maps/:/app/config/maps/
       - ./prod/config.alex:/app/config/mods/config.alex
       - ./prod/ASP_version.txt:/app/config/mods/ASP_version.txt

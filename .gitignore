@@ -44,4 +44,5 @@ bin/
 /prod/maps/
 /prod/image-input/
 /prod/runtime-config/
+/prod/runtime-dumps/
 /ci-libs/

@@ -118,6 +118,8 @@ jobs:
             ${{ runner.temp }}/plague-server-v159.3-*.tar.zst
             ${{ runner.temp }}/plague-server-v159.3-*.tar.zst.sha256
             ${{ runner.temp }}/plague-server-v159.3-*.manifest.txt
+            docker-compose.production.yml
+            scripts/deploy-v159.3.sh
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
