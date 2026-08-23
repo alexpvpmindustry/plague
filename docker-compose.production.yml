@@ -22,7 +22,7 @@ services:
     environment:
       PORT: 6567
     healthcheck:
-      test: [ 'CMD-SHELL', "ss -ltn | grep -Eq '[:.]$${PORT}[[:space:]]' && ss -lun | grep -Eq '[:.]$${PORT}[[:space:]]'" ]
+      test: [ 'CMD-SHELL', "ss -ltn | grep -Eq '[:.]6567[[:space:]]' && ss -lun | grep -Eq '[:.]6567[[:space:]]'" ]
       interval: 30s
       timeout: 20s
       retries: 5
