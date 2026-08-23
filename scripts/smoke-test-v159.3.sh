@@ -37,8 +37,9 @@ cp "$plague_jar" "$mods_dir/plague-core.jar"
 
 set +e
 (
+  cd "$smoke_dir"
   { sleep 30; printf 'exit\n'; } |
-    java -Xms128m -Xmx1g -jar "$smoke_dir/server-release.jar"
+    java -Xms128m -Xmx1g -jar server-release.jar
 ) >"$log_file" 2>&1
 server_status=$?
 set -e
