@@ -42,3 +42,4 @@ bin/
 .DS_Store
 
 /prod/maps/
+/prod/image-input/

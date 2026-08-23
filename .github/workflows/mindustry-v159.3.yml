@@ -37,6 +37,49 @@ jobs:
       - name: Smoke test Plague on Mindustry v159.3
         run: bash scripts/smoke-test-v159.3.sh
 
+      - name: Build production image
+        id: image
+        run: |
+          mkdir -p prod/image-input
+          cp plague-core/build/libs/plague-core-0.0.20.jar prod/image-input/plague-core.jar
+          image="plague-server:v159.3-${GITHUB_SHA::12}"
+          echo "tag=$image" >> "$GITHUB_OUTPUT"
+          docker build \
+            --file prod/Dockerfiles/mindustry.Dockerfile \
+            --tag "$image" \
+            .
+
+      - name: Smoke test production image
+        run: bash scripts/smoke-test-image-v159.3.sh "${{ steps.image.outputs.tag }}"
+
+      - name: Export production image and checksum
+        run: |
+          archive="${RUNNER_TEMP}/plague-server-v159.3-${GITHUB_SHA::12}.tar.zst"
+          docker save "${{ steps.image.outputs.tag }}" | zstd --threads=0 --no-progress -19 -o "$archive"
+          sha256sum "$archive" >"$archive.sha256"
+          cat "$archive.sha256"
+
+      - name: Upload image smoke-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plague-image-smoke-log-v159.3
+          path: ${{ runner.temp }}/plague-image-smoke.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload production image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plague-server-image-v159.3
+          path: |
+            ${{ runner.temp }}/plague-server-v159.3-*.tar.zst
+            ${{ runner.temp }}/plague-server-v159.3-*.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
       - name: Upload smoke-test log
         if: always()
         uses: actions/upload-artifact@v4

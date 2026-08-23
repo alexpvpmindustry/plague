@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.github.kennarddh.mindustry"
-version = "1.0"
+version = "0.0.20"
 
 repositories {
     mavenCentral()
