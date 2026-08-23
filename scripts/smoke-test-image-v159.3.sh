@@ -4,13 +4,17 @@ set -euo pipefail
 image="${1:?Usage: smoke-test-image-v159.3.sh IMAGE}"
 container="plague-image-smoke-${GITHUB_RUN_ID:-local}"
 log_file="${RUNNER_TEMP:-/tmp}/plague-image-smoke.log"
+state_dir="${RUNNER_TEMP:-/tmp}/plague-image-state"
+
+rm -rf "$state_dir"
+mkdir -p "$state_dir"
 
 cleanup() {
   docker rm --force "$container" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-docker run --detach --name "$container" "$image" >/dev/null
+docker run --detach --name "$container" --volume "$state_dir:/app/config" "$image" >/dev/null
 
 ready=false
 for _ in $(seq 1 45); do
@@ -31,9 +35,16 @@ docker logs "$container" >"$log_file" 2>&1 || true
 cat "$log_file"
 
 if [[ "$ready" != true ]]; then
-  echo "The packaged image did not reach a ready Plague server state." >&2
+  echo "The packaged image did not reach a ready Plague server state with persistent config mounted." >&2
   exit 1
 fi
+
+for plugin in kotlin-runtime.jar genesis-core.jar genesis-standard.jar plague-core.jar; do
+  if [[ ! -f "$state_dir/mods/$plugin" ]]; then
+    echo "Managed plugin was not seeded into persistent config: $plugin" >&2
+    exit 1
+  fi
+done
 
 bad_pattern='NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|UnsupportedClassVersionError|Error loading mod|Failed to load mod|Exception in thread'
 if grep -E "$bad_pattern" "$log_file"; then
