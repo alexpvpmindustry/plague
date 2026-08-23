@@ -11,8 +11,8 @@ plugins {
 }
 
 toxopid {
-    compileVersion.set("v146")
-    runtimeVersion.set("v146")
+    compileVersion.set("v159.3")
+    runtimeVersion.set("v159.3")
     platforms.add(ModPlatform.HEADLESS)
 }
 
