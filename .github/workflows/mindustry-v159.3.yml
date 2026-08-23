@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -33,6 +33,18 @@ jobs:
 
       - name: Build Plague for Mindustry v159.3
         run: ./gradlew --no-daemon clean :plague-core:jar
+
+      - name: Smoke test Plague on Mindustry v159.3
+        run: bash scripts/smoke-test-v159.3.sh
+
+      - name: Upload smoke-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plague-smoke-log-v159.3
+          path: ${{ runner.temp }}/plague-smoke/server.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload Plague JAR
         if: success()
