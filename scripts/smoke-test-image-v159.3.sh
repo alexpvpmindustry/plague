@@ -4,6 +4,7 @@ set -euo pipefail
 image="${1:?Usage: smoke-test-image-v159.3.sh IMAGE}"
 container="plague-image-smoke-${GITHUB_RUN_ID:-local}"
 log_file="${RUNNER_TEMP:-/tmp}/plague-image-smoke.log"
+plain_log="${RUNNER_TEMP:-/tmp}/plague-image-smoke.plain.log"
 state_dir="${RUNNER_TEMP:-/tmp}/plague-image-state"
 
 rm -rf "$state_dir"
@@ -24,9 +25,11 @@ docker run --detach \
 ready=false
 for _ in $(seq 1 45); do
   docker logs "$container" >"$log_file" 2>&1 || true
-  if grep -q 'Opened a server on port 6567' "$log_file" \
-    && grep -q 'Hosted' "$log_file" \
-    && grep -q 'PlagueCore' "$log_file"; then
+  python3 -c 'import re, sys; sys.stdout.write(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()))' \
+    <"$log_file" >"$plain_log"
+  if grep -q 'Opened a server on port 6567' "$plain_log" \
+    && grep -q 'Hosted' "$plain_log" \
+    && grep -q 'PlagueCore' "$plain_log"; then
     ready=true
     break
   fi
@@ -69,7 +72,7 @@ if [[ "$(docker inspect --format '{{.State.OOMKilled}}' "$container")" != false 
 fi
 
 bad_pattern='NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|AbstractMethodError|VerifyError|LinkageError|UnsupportedClassVersionError|OutOfMemoryError|Error loading mod|Failed to load mod|Exception in thread'
-if grep -E "$bad_pattern" "$log_file"; then
+if grep -E "$bad_pattern" "$plain_log"; then
   echo "A runtime compatibility error was found in the image log." >&2
   exit 1
 fi
