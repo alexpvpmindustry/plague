@@ -758,7 +758,7 @@ class PlagueHandler : Handler {
             Vars.state.teams.registerCore(event.tile.build as CoreBuild)
 
             Vars.state.rules.loadout.forEach {
-                newTeam.core().items().add(it.item, it.amount.coerceAtMost(newTeam.core().storageCapacity))
+                newTeam.core().items.add(it.item, it.amount.coerceAtMost(newTeam.core().storageCapacity))
             }
 
             event.builder.player.unit().kill()
@@ -919,17 +919,17 @@ class PlagueHandler : Handler {
                 val block = it.block as UnitFactory
 
                 if (bannedUnits.contains(block.plans[it.currentPlan].unit)) {
-                    it.enabled(false)
+                    it.enabled = false
                 } else {
-                    it.enabled(true)
+                    it.enabled = true
                 }
             } else if (it is ReconstructorBuild) {
                 if (it.payload == null) return@forEach
 
                 if (bannedUnits.contains(it.upgrade(it.payload.unit.type))) {
-                    it.enabled(false)
+                    it.enabled = false
                 } else {
-                    it.enabled(true)
+                    it.enabled = true
                 }
             }
         }
@@ -992,7 +992,7 @@ class PlagueHandler : Handler {
         clearUnitWeapons(UnitTypes.quad)
         clearUnitWeapons(UnitTypes.oct)
 
-        Team.malis.items()?.clear()
+        Team.malis.items?.clear()
 
         // Make sure power source cannot be destroyed and cannot be disabled
         Vars.world.tiles.forEach {
@@ -1313,22 +1313,22 @@ class PlagueHandler : Handler {
             return
         }
 
-        val enoughResources = PlagueVars.newCoreCost.all { vault.items().get(it.item) >= it.amount }
+        val enoughResources = PlagueVars.newCoreCost.all { vault.items.get(it.item) >= it.amount }
 
         if (!enoughResources)
             return event.player.sendMessage("[scarlet]Not enough resources to convert vault to core.")
 
         PlagueVars.newCoreCost.forEach {
-            vault.items().remove(it)
+            vault.items.remove(it)
         }
 
-        val remainingItems = vault.items()
+        val remainingItems = vault.items
 
         event.tile.build.tile.setNet(Blocks.coreShard, event.tile.team(), 0)
 
         // Refund remaining items in vault if it wasn't linked to core
         remainingItems.each { item, amount ->
-            event.tile.team().items().add(item, amount)
+            event.tile.team().items.add(item, amount)
         }
     }
 
@@ -1355,9 +1355,9 @@ class PlagueHandler : Handler {
         )
 
         PlagueVars.monoReward.forEach {
-            val availableSpace = event.unit.team.core().storageCapacity - event.unit.team.items().get(it.item)
+            val availableSpace = event.unit.team.core().storageCapacity - event.unit.team.items.get(it.item)
 
-            event.unit.team.items().add(it.item, it.amount.coerceAtMost(availableSpace))
+            event.unit.team.items.add(it.item, it.amount.coerceAtMost(availableSpace))
         }
     }
 
