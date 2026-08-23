@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -22,6 +25,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.SOURCE_SHA }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
@@ -70,11 +75,11 @@ jobs:
           mkdir -p prod/image-input
           cp plague-core/build/libs/plague-core-0.0.20.jar prod/image-input/plague-core.jar
           image="plague-server:v159.3"
-          immutable_image="plague-server:v159.3-${GITHUB_SHA::12}"
+          immutable_image="plague-server:v159.3-${SOURCE_SHA::12}"
           echo "tag=$image" >> "$GITHUB_OUTPUT"
           docker build \
             --file prod/Dockerfiles/mindustry.Dockerfile \
-            --build-arg "VCS_REF=$GITHUB_SHA" \
+            --build-arg "VCS_REF=$SOURCE_SHA" \
             --tag "$image" \
             --tag "$immutable_image" \
             .
@@ -84,19 +89,19 @@ jobs:
 
       - name: Export production image and checksum
         run: |
-          archive="${RUNNER_TEMP}/plague-server-v159.3-${GITHUB_SHA::12}.tar.zst"
+          archive="${RUNNER_TEMP}/plague-server-v159.3-${SOURCE_SHA::12}.tar.zst"
           docker save "${{ steps.image.outputs.tag }}" | zstd --threads=0 --no-progress -19 -o "$archive"
           archive_dir=$(dirname "$archive")
           archive_name=$(basename "$archive")
           (cd "$archive_dir" && sha256sum "$archive_name" >"$archive_name.sha256")
           revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${{ steps.image.outputs.tag }}")
-          test "$revision" = "$GITHUB_SHA"
+          test "$revision" = "$SOURCE_SHA"
           image_id=$(docker image inspect --format '{{.Id}}' "${{ steps.image.outputs.tag }}")
           jar_sha256=$(sha256sum plague-core/build/libs/plague-core-0.0.20.jar | cut -d' ' -f1)
           archive_sha256=$(cut -d' ' -f1 "$archive.sha256")
-          manifest="${RUNNER_TEMP}/plague-server-v159.3-${GITHUB_SHA::12}.manifest.txt"
+          manifest="${RUNNER_TEMP}/plague-server-v159.3-${SOURCE_SHA::12}.manifest.txt"
           printf 'source_commit=%s\nimage_tag=%s\nimage_id=%s\nplague_jar_sha256=%s\narchive_sha256=%s\n' \
-            "$GITHUB_SHA" "${{ steps.image.outputs.tag }}" "$image_id" "$jar_sha256" "$archive_sha256" >"$manifest"
+            "$SOURCE_SHA" "${{ steps.image.outputs.tag }}" "$image_id" "$jar_sha256" "$archive_sha256" >"$manifest"
           cat "$archive.sha256"
           cat "$manifest"
 
