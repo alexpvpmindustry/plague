@@ -1,5 +1,6 @@
 services:
   server:
+    image: plague-server:v159.3
     build:
       context: .
       dockerfile: ./prod/Dockerfiles/mindustry.Dockerfile
