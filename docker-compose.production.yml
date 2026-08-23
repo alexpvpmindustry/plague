@@ -1,9 +1,7 @@
 services:
   server:
     image: plague-server:v159.3
-    build:
-      context: .
-      dockerfile: ./prod/Dockerfiles/mindustry.Dockerfile
+    container_name: plague-server-1
     init: true
     tty: true
     stdin_open: true
@@ -23,7 +21,7 @@ services:
     environment:
       PORT: 6567
     healthcheck:
-      test: [ 'CMD-SHELL', 'ss -ltu | grep $$PORT | wc -l | grep 2' ]
+      test: [ 'CMD-SHELL', "ss -ltn | grep -Eq '[:.]$${PORT}[[:space:]]' && ss -lun | grep -Eq '[:.]$${PORT}[[:space:]]'" ]
       interval: 30s
       timeout: 20s
       retries: 5

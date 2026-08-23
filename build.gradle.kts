@@ -9,11 +9,6 @@ repositories {
     mavenCentral()
     maven("https://maven.xpdustry.com/releases")
     maven("https://maven.xpdustry.com/mindustry")
-
-    maven {
-        url = uri("http://23.95.107.12:9999/releases")
-        isAllowInsecureProtocol = true
-    }
 }
 
 subprojects {
@@ -26,11 +21,6 @@ subprojects {
         mavenCentral()
         maven("https://maven.xpdustry.com/releases")
         maven("https://maven.xpdustry.com/mindustry")
-
-        maven {
-            url = uri("http://23.95.107.12:9999/releases")
-            isAllowInsecureProtocol = true
-        }
     }
 
     java {

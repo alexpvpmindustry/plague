@@ -14,12 +14,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run --detach --name "$container" --volume "$state_dir:/app/config" "$image" >/dev/null
+docker run --detach \
+  --name "$container" \
+  --memory 2g \
+  --cpus 2 \
+  --volume "$state_dir:/app/config" \
+  "$image" >/dev/null
 
 ready=false
 for _ in $(seq 1 45); do
   docker logs "$container" >"$log_file" 2>&1 || true
-  if grep -F 'Server loaded' "$log_file" >/dev/null && grep -F 'PlagueCore' "$log_file" >/dev/null; then
+  if grep -q 'Opened a server on port 6567' "$log_file" \
+    && grep -q 'Hosted' "$log_file" \
+    && grep -q 'PlagueCore' "$log_file"; then
     ready=true
     break
   fi
@@ -46,7 +53,22 @@ for plugin in kotlin-runtime.jar genesis-core.jar genesis-standard.jar plague-co
   fi
 done
 
-bad_pattern='NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|UnsupportedClassVersionError|Error loading mod|Failed to load mod|Exception in thread'
+if ! docker exec "$container" ss -ltn | grep -Eq '[:.]6567[[:space:]]'; then
+  echo "Packaged server has no TCP listener on port 6567." >&2
+  exit 1
+fi
+
+if ! docker exec "$container" ss -lun | grep -Eq '[:.]6567[[:space:]]'; then
+  echo "Packaged server has no UDP listener on port 6567." >&2
+  exit 1
+fi
+
+if [[ "$(docker inspect --format '{{.State.OOMKilled}}' "$container")" != false ]]; then
+  echo "Packaged server was OOM-killed." >&2
+  exit 1
+fi
+
+bad_pattern='NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|AbstractMethodError|VerifyError|LinkageError|UnsupportedClassVersionError|OutOfMemoryError|Error loading mod|Failed to load mod|Exception in thread'
 if grep -E "$bad_pattern" "$log_file"; then
   echo "A runtime compatibility error was found in the image log." >&2
   exit 1

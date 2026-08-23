@@ -35,8 +35,31 @@ jobs:
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
 
+      - name: Download and verify exact compile inputs
+        run: |
+          mkdir -p ci-libs
+          curl --fail --location --retry 3 --output ci-libs/server-release.jar \
+            https://github.com/Anuken/Mindustry/releases/download/v159.3/server-release.jar
+          curl --fail --location --retry 3 --output ci-libs/kotlin-runtime.jar \
+            https://github.com/xpdustry/kotlin-runtime/releases/download/v3.1.1-k.1.9.22/kotlin-runtime.jar
+          curl --fail --location --retry 3 --output ci-libs/genesis-core.jar \
+            https://github.com/kennarddh-mindustry/genesis/releases/download/v3.0.0-beta.27/genesis-core-3.0.0-beta.27.jar
+          curl --fail --location --retry 3 --output ci-libs/genesis-standard.jar \
+            https://github.com/kennarddh-mindustry/genesis/releases/download/v3.0.0-beta.27/genesis-standard-3.0.0-beta.27.jar
+          sha256sum --check --strict <<'SUMS'
+          edb1e75eeb91520e6154b81714df5e5a0fa7d711fe1c010dbe124f7eca82bbfb  ci-libs/server-release.jar
+          36633c7aabc93ebf2c8f79aefc6e954efaa2f6abe913a133033c4284c329b9c1  ci-libs/kotlin-runtime.jar
+          31e1bda9e062c3d40181544f4d24f634a3d923112327b7a406fcdf078f7cba7f  ci-libs/genesis-core.jar
+          7d69422916a0360b8caf2e351d1cb732221609244ecb490197273332cb799b21  ci-libs/genesis-standard.jar
+          SUMS
+
       - name: Build Plague for Mindustry v159.3
-        run: ./gradlew --no-daemon clean :plague-core:jar
+        run: |
+          ./gradlew --no-daemon clean :plague-core:jar \
+            -PmindustryServerJar="$GITHUB_WORKSPACE/ci-libs/server-release.jar" \
+            -PkotlinRuntimeJar="$GITHUB_WORKSPACE/ci-libs/kotlin-runtime.jar" \
+            -PgenesisCoreJar="$GITHUB_WORKSPACE/ci-libs/genesis-core.jar" \
+            -PgenesisStandardJar="$GITHUB_WORKSPACE/ci-libs/genesis-standard.jar"
 
       - name: Smoke test Plague on Mindustry v159.3
         run: bash scripts/smoke-test-v159.3.sh
@@ -46,11 +69,14 @@ jobs:
         run: |
           mkdir -p prod/image-input
           cp plague-core/build/libs/plague-core-0.0.20.jar prod/image-input/plague-core.jar
-          image="plague-server:v159.3-${GITHUB_SHA::12}"
+          image="plague-server:v159.3"
+          immutable_image="plague-server:v159.3-${GITHUB_SHA::12}"
           echo "tag=$image" >> "$GITHUB_OUTPUT"
           docker build \
             --file prod/Dockerfiles/mindustry.Dockerfile \
+            --build-arg "VCS_REF=$GITHUB_SHA" \
             --tag "$image" \
+            --tag "$immutable_image" \
             .
 
       - name: Smoke test production image
@@ -63,7 +89,16 @@ jobs:
           archive_dir=$(dirname "$archive")
           archive_name=$(basename "$archive")
           (cd "$archive_dir" && sha256sum "$archive_name" >"$archive_name.sha256")
+          revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${{ steps.image.outputs.tag }}")
+          test "$revision" = "$GITHUB_SHA"
+          image_id=$(docker image inspect --format '{{.Id}}' "${{ steps.image.outputs.tag }}")
+          jar_sha256=$(sha256sum plague-core/build/libs/plague-core-0.0.20.jar | cut -d' ' -f1)
+          archive_sha256=$(cut -d' ' -f1 "$archive.sha256")
+          manifest="${RUNNER_TEMP}/plague-server-v159.3-${GITHUB_SHA::12}.manifest.txt"
+          printf 'source_commit=%s\nimage_tag=%s\nimage_id=%s\nplague_jar_sha256=%s\narchive_sha256=%s\n' \
+            "$GITHUB_SHA" "${{ steps.image.outputs.tag }}" "$image_id" "$jar_sha256" "$archive_sha256" >"$manifest"
           cat "$archive.sha256"
+          cat "$manifest"
 
       - name: Upload image smoke-test log
         if: always()
@@ -82,6 +117,7 @@ jobs:
           path: |
             ${{ runner.temp }}/plague-server-v159.3-*.tar.zst
             ${{ runner.temp }}/plague-server-v159.3-*.tar.zst.sha256
+            ${{ runner.temp }}/plague-server-v159.3-*.manifest.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

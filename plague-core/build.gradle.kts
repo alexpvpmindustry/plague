@@ -1,4 +1,3 @@
-import fr.xpdustry.toxopid.dsl.mindustryDependencies
 import fr.xpdustry.toxopid.spec.ModMetadata
 import fr.xpdustry.toxopid.spec.ModPlatform
 import fr.xpdustry.toxopid.task.GithubArtifactDownload
@@ -21,13 +20,20 @@ val metadata = ModMetadata.fromJson(project.file("plugin.json"))
 project.version = metadata.version
 
 val genesisVersion = "3.0.0-beta.27"
+val mindustryServerJar = providers.gradleProperty("mindustryServerJar").orNull
+    ?: error("Pass -PmindustryServerJar=/absolute/path/to/server-release.jar")
+val kotlinRuntimeJar = providers.gradleProperty("kotlinRuntimeJar").orNull
+    ?: error("Pass -PkotlinRuntimeJar=/absolute/path/to/kotlin-runtime.jar")
+val genesisCoreJar = providers.gradleProperty("genesisCoreJar").orNull
+    ?: error("Pass -PgenesisCoreJar=/absolute/path/to/genesis-core.jar")
+val genesisStandardJar = providers.gradleProperty("genesisStandardJar").orNull
+    ?: error("Pass -PgenesisStandardJar=/absolute/path/to/genesis-standard.jar")
 
 dependencies {
-    mindustryDependencies()
-
-    compileOnly("com.xpdustry:kotlin-runtime:3.1.1-k.1.9.22")
-    compileOnly("com.github.kennarddh.mindustry:genesis-core:$genesisVersion")
-    compileOnly("com.github.kennarddh.mindustry:genesis-standard:$genesisVersion")
+    compileOnly(files(mindustryServerJar))
+    compileOnly(files(kotlinRuntimeJar))
+    compileOnly(files(genesisCoreJar))
+    compileOnly(files(genesisStandardJar))
 
     implementation("org.slf4j:slf4j-api:2.0.11")
 }
@@ -117,17 +123,6 @@ tasks.register<MindustryExec>("runMindustryClient2") {
 }
 
 publishing {
-    repositories {
-        maven {
-            name = "reposilite"
-            url = uri("http://23.95.107.12:9999/releases")
-            credentials(PasswordCredentials::class)
-            authentication {
-                create<BasicAuthentication>("basic")
-            }
-            isAllowInsecureProtocol = true
-        }
-    }
     publications {
         create<MavenPublication>("maven") {
             groupId = groupId
