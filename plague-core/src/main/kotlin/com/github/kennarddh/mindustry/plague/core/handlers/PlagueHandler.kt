@@ -992,7 +992,7 @@ class PlagueHandler : Handler {
         clearUnitWeapons(UnitTypes.quad)
         clearUnitWeapons(UnitTypes.oct)
 
-        Team.malis.items?.clear()
+        Team.malis.items()?.clear()
 
         // Make sure power source cannot be destroyed and cannot be disabled
         Vars.world.tiles.forEach {
@@ -1328,7 +1328,7 @@ class PlagueHandler : Handler {
 
         // Refund remaining items in vault if it wasn't linked to core
         remainingItems.each { item, amount ->
-            event.tile.team().items.add(item, amount)
+            event.tile.team().items().add(item, amount)
         }
     }
 
@@ -1355,9 +1355,9 @@ class PlagueHandler : Handler {
         )
 
         PlagueVars.monoReward.forEach {
-            val availableSpace = event.unit.team.core().storageCapacity - event.unit.team.items.get(it.item)
+            val availableSpace = event.unit.team.core().storageCapacity - event.unit.team.items().get(it.item)
 
-            event.unit.team.items.add(it.item, it.amount.coerceAtMost(availableSpace))
+            event.unit.team.items().add(it.item, it.amount.coerceAtMost(availableSpace))
         }
     }
 
