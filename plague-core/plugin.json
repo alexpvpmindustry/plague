@@ -3,10 +3,10 @@
   "displayName": "PlagueCore",
   "author": "Kennarddh",
   "description": "Plague.",
-  "minGameVersion": "146",
+  "minGameVersion": "159",
   "java": true,
   "main": "com.github.kennarddh.mindustry.plague.core.Plague",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "repo": "kennarddh-mindustry/plague",
   "dependencies": [
     "kotlin-runtime",
