@@ -18,7 +18,7 @@ class WelcomeHandler : Handler {
             [maroon]=== [gold]QUICK START[] ===[]
             This is a game of [forest]Plague[](default) vs [yellow]Survivor[]. Last one standing.
             [maroon]=== [gold]GAME STAGES[] ===[]
-            [royal]Prepare state (2min)[]: The timer starts when the first player joins. Place any block at least 100 tiles from the nearest plague core to become [yellow]Survivor[].
+            [royal]Prepare state (2min)[]: The first player starts automatically as a [yellow]Survivor[] near a map corner. Later players can type [gold]/plague[] or fly to a clear area and type [gold]/survivor[].
             [royal]First Phase (45min)[]: [forest]Plague[] make units, [yellow]Survivor[] make defense. Air units don't do damage.
             [royal]Second Phase (15min)[]: Air units do damage.
             [royal]Sudden Death[]: [yellow]Survivors[] won, but [forest]Plague[] multiplies in strength. [yellow]Survive[] as long as possible.

@@ -88,6 +88,25 @@ class PlagueHandler : Handler {
 
     private val activePlagueAttackerUnitsMutex = Mutex()
 
+    private val survivorCreationMutex = Mutex()
+
+    private var cornerSearchComplete = false
+
+    private var cachedSafeCornerTilePosition: Int? = null
+
+    private enum class SurvivorCreationResult {
+        CREATED,
+        JOINED,
+        NOT_ELIGIBLE,
+        FAILED,
+    }
+
+    private enum class SurvivorCreationSource {
+        AUTOMATIC,
+        COMMAND,
+        BUILD,
+    }
+
     companion object {
         fun isValidSurvivorTeam(team: Team) = team.id > 6
     }
@@ -568,8 +587,9 @@ class PlagueHandler : Handler {
                     checkTile == null ||
                     // Tile with block
                     checkTile.build != null ||
-                    // Deep water
-                    checkTile.floor().isDeep ||
+                    checkTile.block() != Blocks.air ||
+                    // Any liquid floor
+                    checkTile.floor().isLiquid ||
                     // Exactly same block
                     (block == checkTile.block() && checkTile.build != null && block.rotate) ||
                     !checkTile.floor().placeableOn
@@ -579,6 +599,59 @@ class PlagueHandler : Handler {
         }
 
         return true
+    }
+
+    private fun findValidSurvivorCornerTile(): Tile? {
+        if (cornerSearchComplete) {
+            return cachedSafeCornerTilePosition?.let { Vars.world.tile(it) }
+        }
+
+        val margin = max(5, Blocks.coreFoundation.size + 2)
+        val width = Vars.world.width()
+        val height = Vars.world.height()
+
+        if (width <= margin * 2 || height <= margin * 2) {
+            cornerSearchComplete = true
+            return null
+        }
+
+        val anchors = CornerSpawnRules.cornerAnchors(width, height, margin)
+            .sortedByDescending { anchor ->
+                Team.malis.cores().minOfOrNull { core ->
+                    core.dst(anchor.x * Vars.tilesize.toFloat(), anchor.y * Vars.tilesize.toFloat())
+                } ?: Float.MAX_VALUE
+            }
+        val candidates = CornerSpawnRules.boundedCandidates(
+            anchors = anchors,
+            width = width,
+            height = height,
+            maximumRadius = minOf(minOf(width, height) / 4, 96),
+            stride = 1,
+            maximumCandidates = 8192,
+        )
+
+        for (candidate in candidates) {
+            val tile = Vars.world.tile(candidate.x, candidate.y) ?: continue
+            if (!validPlace(Blocks.coreFoundation, tile)) continue
+
+            val farEnough = Team.malis.cores().all { core ->
+                SurvivorStartRules.isFarEnoughFromPlague(
+                    core.dst(tile),
+                    Vars.tilesize,
+                    PlagueVars.survivorsMinBuildRangeFromPlagueCoreInTiles
+                )
+            }
+
+            if (farEnough) {
+                cornerSearchComplete = true
+                cachedSafeCornerTilePosition = tile.pos()
+                return tile
+            }
+        }
+
+        cornerSearchComplete = true
+        cachedSafeCornerTilePosition = null
+        return null
     }
 
     fun getClosestEnemyCore(
@@ -691,78 +764,161 @@ class PlagueHandler : Handler {
         }
     }
 
+    @Command(["survivor"])
+    @Description("Create or join a survivor team at your current position.")
+    fun survivorCommand(sender: PlayerCommandSender) {
+        runOnMindustryThread {
+            val tile: Tile? = sender.player.tileOn()
+            if (tile == null) {
+                sender.player.sendMessage("[scarlet]You are outside the map. Move over a valid tile and try /survivor again.")
+                return@runOnMindustryThread
+            }
+
+            runBlocking {
+                createSurvivorCore(sender.player, tile, SurvivorCreationSource.COMMAND)
+            }
+        }
+    }
+
     @EventHandler(true)
     suspend fun createSurvivorCoreEventHandler(event: EventType.BuildSelectEvent) {
-        PlagueVars.stateLock.withLock {
-            if (PlagueVars.state != PlagueState.Prepare) return
-        }
-
         if (event.builder.player == null) return
         if (event.builder.team() != Team.blue) return
         if (event.breaking) return
 
-        event.tile.removeNet()
+        createSurvivorCore(event.builder.player, event.tile, SurvivorCreationSource.BUILD)
+    }
 
-        if (!validPlace(Blocks.coreShard, event.tile))
-            return event.builder.player.sendMessage("[scarlet]Invalid core position.")
+    private suspend fun createSurvivorCore(
+        player: Player,
+        tile: Tile,
+        source: SurvivorCreationSource,
+        requireFirstSurvivor: Boolean = false,
+    ): SurvivorCreationResult = survivorCreationMutex.withLock {
+        val isPrepare = PlagueVars.stateLock.withLock { PlagueVars.state == PlagueState.Prepare }
+        if (!isPrepare) {
+            player.sendMessage("[scarlet]Survivor teams can only be started during the Prepare stage.")
+            return@withLock SurvivorCreationResult.NOT_ELIGIBLE
+        }
+
+        if (player.team() != Team.blue) {
+            if (!requireFirstSurvivor) player.sendMessage("[scarlet]You are already on a team.")
+            return@withLock SurvivorCreationResult.NOT_ELIGIBLE
+        }
+
+        if (requireFirstSurvivor && survivorTeamsData.isNotEmpty()) {
+            return@withLock SurvivorCreationResult.NOT_ELIGIBLE
+        }
+
+        // A blue build is only a placement trigger. Consume it after eligibility is confirmed.
+        if (source == SurvivorCreationSource.BUILD) tile.removeNet()
+
+        if (!validPlace(Blocks.coreFoundation, tile)) {
+            player.sendMessage("[scarlet]Invalid core position. Move to a clear 4 by 4 area and try /survivor again.")
+            return@withLock SurvivorCreationResult.FAILED
+        }
 
         for (core in Team.malis.cores()) {
-            if (core.dst(event.tile) < 100 * Vars.tilesize)
-                return event.builder.player.sendMessage("[scarlet]Core must be at least 100 tiles away from nearest plague's core.")
+            if (!SurvivorStartRules.isFarEnoughFromPlague(
+                    core.dst(tile),
+                    Vars.tilesize,
+                    PlagueVars.survivorsMinBuildRangeFromPlagueCoreInTiles
+                )
+            ) {
+                player.sendMessage("[scarlet]Core must be at least 100 tiles away from nearest plague's core.")
+                return@withLock SurvivorCreationResult.FAILED
+            }
         }
 
         val (closestEnemyCoreInRange, distanceToClosestEnemyCoreInRange) = getClosestEnemyCore(
-            event.tile.x.toFloat() * Vars.tilesize,
-            event.tile.y.toFloat() * Vars.tilesize,
+            tile.x.toFloat() * Vars.tilesize,
+            tile.y.toFloat() * Vars.tilesize,
             0f..((PlagueVars.survivorCoreMaxJoinDistanceInTiles * Vars.tilesize).toFloat()),
             listOf(Team.malis)
         )
 
-        if (distanceToClosestEnemyCoreInRange < PlagueVars.newSurvivorCoreMinDistanceFromPlagueCoreInTiles * Vars.tilesize)
-            return event.builder.player.sendMessage("[scarlet]Core must be at least 70 tiles away from nearest survivor's core.")
+        if (distanceToClosestEnemyCoreInRange < PlagueVars.newSurvivorCoreMinDistanceFromPlagueCoreInTiles * Vars.tilesize) {
+            player.sendMessage("[scarlet]Core must be at least 70 tiles away from nearest survivor's core.")
+            return@withLock SurvivorCreationResult.FAILED
+        }
 
         if (closestEnemyCoreInRange != null) {
-            // Join closest survivor core team
-            if (teamsPlayersUUIDBlacklist[closestEnemyCoreInRange.team]?.contains(event.builder.player.uuid()) == true)
-                return event.builder.player.sendMessage("[scarlet]You are blacklisted from joining the team '${closestEnemyCoreInRange.team.name}' because you were kicked by the team owner.")
-
             val survivorTeamData = survivorTeamsData[closestEnemyCoreInRange.team()]
-                ?: return event.builder.player.sendMessage("[scarlet]Error occurred. SurvivorTeamData == null when joining a team.")
-
-            if (survivorTeamData.locked)
-                return event.builder.player.sendMessage("[scarlet]The closest team '${closestEnemyCoreInRange.team.name}' is locked.")
-
-            survivorTeamData.playersUUID.add(event.builder.player.uuid())
-
-            changePlayerTeam(event.builder.player, closestEnemyCoreInRange.team)
-
-            event.tile.setNet(Blocks.coreFoundation, closestEnemyCoreInRange.team, 0)
-
-            Vars.state.teams.registerCore(event.tile.build as CoreBuild)
-
-            event.builder.player.unit().kill()
-        } else {
-            // Create new team
-            val newTeam = getNewEmptySurvivorTeam()
-                ?: return event.builder.player.sendMessage("[scarlet]No available team.")
-
-            survivorTeamsData[newTeam] = SurvivorTeamData(
-                event.builder.player.uuid(), mutableSetOf(event.builder.player.uuid())
-            )
-
-            teamsPlayersUUIDBlacklist[newTeam] = Collections.synchronizedSet(mutableSetOf())
-
-            changePlayerTeam(event.builder.player, newTeam)
-
-            event.tile.setNet(Blocks.coreFoundation, newTeam, 0)
-
-            Vars.state.teams.registerCore(event.tile.build as CoreBuild)
-
-            Vars.state.rules.loadout.forEach {
-                newTeam.core().items.add(it.item, it.amount.coerceAtMost(newTeam.core().storageCapacity))
+            if (survivorTeamData == null) {
+                player.sendMessage("[scarlet]The nearby Survivor team is no longer available. Try again.")
+                return@withLock SurvivorCreationResult.FAILED
             }
 
-            event.builder.player.unit().kill()
+            if (teamsPlayersUUIDBlacklist[closestEnemyCoreInRange.team]?.contains(player.uuid()) == true) {
+                player.sendMessage("[scarlet]You are blacklisted from joining the team '${closestEnemyCoreInRange.team.name}'.")
+                return@withLock SurvivorCreationResult.NOT_ELIGIBLE
+            }
+
+            if (survivorTeamData.locked) {
+                player.sendMessage("[scarlet]The closest team '${closestEnemyCoreInRange.team.name}' is locked.")
+                return@withLock SurvivorCreationResult.NOT_ELIGIBLE
+            }
+
+            val playerWasAdded = survivorTeamData.playersUUID.add(player.uuid())
+            try {
+                changePlayerTeam(player, closestEnemyCoreInRange.team)
+                tile.setNet(Blocks.coreFoundation, closestEnemyCoreInRange.team, 0)
+                val coreBuild = tile.build as? CoreBuild
+                    ?: error("Core foundation did not create a CoreBuild")
+                Vars.state.teams.registerCore(coreBuild)
+                if (player.dead()) CoreBlock.playerSpawn(tile, player) else player.unit().kill()
+                player.sendMessage("[green]You joined the '${closestEnemyCoreInRange.team.name}' Survivor team.")
+                return@withLock SurvivorCreationResult.JOINED
+            } catch (error: Exception) {
+                if (playerWasAdded) survivorTeamData.playersUUID.remove(player.uuid())
+                if (tile.build?.team == closestEnemyCoreInRange.team) tile.removeNet()
+                player.team(Team.blue)
+                player.setRules(Vars.state.rules)
+                Logger.error("Failed to join Survivor team: ${error.message}")
+                player.sendMessage("[scarlet]Could not create the Survivor core. Please try again.")
+                return@withLock SurvivorCreationResult.FAILED
+            }
+        }
+
+        val newTeam = getNewEmptySurvivorTeam()
+        if (newTeam == null) {
+            player.sendMessage("[scarlet]No Survivor team is available.")
+            return@withLock SurvivorCreationResult.FAILED
+        }
+
+        survivorTeamsData[newTeam] = SurvivorTeamData(
+            player.uuid(), mutableSetOf(player.uuid())
+        )
+        teamsPlayersUUIDBlacklist[newTeam] = Collections.synchronizedSet(mutableSetOf())
+
+        try {
+            changePlayerTeam(player, newTeam)
+            tile.setNet(Blocks.coreFoundation, newTeam, 0)
+            val coreBuild = tile.build as? CoreBuild
+                ?: error("Core foundation did not create a CoreBuild")
+            Vars.state.teams.registerCore(coreBuild)
+
+            Vars.state.rules.loadout.forEach {
+                coreBuild.items.add(it.item, it.amount.coerceAtMost(coreBuild.storageCapacity))
+            }
+
+            if (player.dead()) CoreBlock.playerSpawn(tile, player) else player.unit().kill()
+            val successMessage = if (source == SurvivorCreationSource.AUTOMATIC) {
+                "[green]Your Survivor core was created near a safe map corner. Build defenses now."
+            } else {
+                "[green]Your Survivor core was created. Build defenses now."
+            }
+            player.sendMessage(successMessage)
+            return@withLock SurvivorCreationResult.CREATED
+        } catch (error: Exception) {
+            survivorTeamsData.remove(newTeam)
+            teamsPlayersUUIDBlacklist.remove(newTeam)
+            if (tile.build?.team == newTeam) tile.removeNet()
+            player.team(Team.blue)
+            player.setRules(Vars.state.rules)
+            Logger.error("Failed to create Survivor team: ${error.message}")
+            player.sendMessage("[scarlet]Could not create the Survivor core. Please try again.")
+            return@withLock SurvivorCreationResult.FAILED
         }
     }
 
@@ -986,8 +1142,18 @@ class PlagueHandler : Handler {
 
     @EventHandler(true)
     suspend fun onPlay(event: EventType.PlayEvent) {
-        PlagueVars.stateLock.withLock {
-            PlagueVars.state = PlagueState.Prepare
+        survivorCreationMutex.withLock {
+            // Survivor teams and their cores belong to one map only.
+            // Clear this before connection confirmation can assign players for the new map.
+            survivorTeamsData.clear()
+            teamsPlayersUUIDBlacklist.clear()
+            lastMinuteUpdatesInMapTimeMinute = -1
+            cornerSearchComplete = false
+            cachedSafeCornerTilePosition = null
+
+            PlagueVars.stateLock.withLock {
+                PlagueVars.state = PlagueState.Prepare
+            }
         }
 
         PlagueVars.totalMapSkipDuration = 0.seconds
@@ -1036,19 +1202,32 @@ class PlagueHandler : Handler {
     }
 
     suspend fun restart(winner: Team) {
-        PlagueVars.stateLock.withLock {
-            if (PlagueVars.state == PlagueState.GameOver) return
+        val shouldRestart = survivorCreationMutex.withLock {
+            val mayRestart = PlagueVars.stateLock.withLock {
+                if (PlagueVars.state == PlagueState.GameOver) {
+                    false
+                } else {
+                    PlagueVars.state = PlagueState.GameOver
+                    true
+                }
+            }
 
-            PlagueVars.state = PlagueState.GameOver
+            if (mayRestart) {
+                survivorTeamsData.clear()
+                teamsPlayersUUIDBlacklist.clear()
+                lastMinuteUpdatesInMapTimeMinute = -1
+                cornerSearchComplete = false
+                cachedSafeCornerTilePosition = null
+            }
+
+            mayRestart
         }
+
+        if (!shouldRestart) return
 
         activePlagueAttackerUnitsMutex.withLock {
             activePlagueAttackerUnits.clear()
         }
-
-        survivorTeamsData.clear()
-        teamsPlayersUUIDBlacklist.clear()
-        lastMinuteUpdatesInMapTimeMinute = -1
 
         val roundExtraTimeDuration = Config.roundExtraTime.num().seconds
 
@@ -1168,6 +1347,28 @@ class PlagueHandler : Handler {
         if (!event.player.dead()) return
 
         runBlocking {
+            val shouldCreateFirstSurvivor = PlagueVars.stateLock.withLock {
+                PlagueVars.state == PlagueState.Prepare &&
+                    event.player.team() == Team.blue &&
+                    survivorTeamsData.isEmpty()
+            }
+
+            if (shouldCreateFirstSurvivor) {
+                val cornerTile = findValidSurvivorCornerTile()
+
+                if (cornerTile != null) {
+                    createSurvivorCore(
+                        event.player,
+                        cornerTile,
+                        SurvivorCreationSource.AUTOMATIC,
+                        requireFirstSurvivor = true,
+                    )
+                } else {
+                    event.player.sendMessage("[scarlet]No safe corner core position was found. Fly to a clear area and type /survivor.")
+                }
+            }
+
+            // Always initialize HUD and player-specific rules after team/spawn selection.
             setupPlayer(event.player)
         }
     }
@@ -1219,9 +1420,18 @@ class PlagueHandler : Handler {
     }
 
     suspend fun onFirstPhase() {
-        PlagueVars.stateLock.withLock {
-            PlagueVars.state = PlagueState.PlayingFirstPhase
+        val phaseStarted = survivorCreationMutex.withLock {
+            PlagueVars.stateLock.withLock {
+                if (PlagueVars.state != PlagueState.Prepare) {
+                    false
+                } else {
+                    PlagueVars.state = PlagueState.PlayingFirstPhase
+                    true
+                }
+            }
         }
+
+        if (!phaseStarted) return
 
         runOnMindustryThread {
             Vars.state.rules.enemyCoreBuildRadius = Vars.state.map.rules().enemyCoreBuildRadius
