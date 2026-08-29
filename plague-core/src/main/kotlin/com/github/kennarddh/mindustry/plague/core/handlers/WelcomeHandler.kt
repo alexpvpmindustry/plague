@@ -2,7 +2,6 @@ package com.github.kennarddh.mindustry.plague.core.handlers
 
 import com.github.kennarddh.mindustry.genesis.core.events.annotations.EventHandler
 import com.github.kennarddh.mindustry.genesis.core.handlers.Handler
-import com.github.kennarddh.mindustry.genesis.standard.extensions.infoMessage
 import mindustry.game.EventType
 import mindustry.net.Administration.Config
 
@@ -13,17 +12,12 @@ class WelcomeHandler : Handler {
 
     @EventHandler
     fun onPlayerJoin(event: EventType.PlayerJoin) {
-        event.player.infoMessage(
+        event.player.sendMessage(
             """
-            [maroon]=== [gold]QUICK START[] ===[]
-            This is a game of [forest]Plague[](default) vs [yellow]Survivor[]. Last one standing.
-            [maroon]=== [gold]GAME STAGES[] ===[]
-            [royal]Prepare state (2min)[]: The first player starts automatically as a [yellow]Survivor[] near a map corner. Later players can type [gold]/plague[] or fly to a clear area and type [gold]/survivor[].
-            [royal]First Phase (45min)[]: [forest]Plague[] make units, [yellow]Survivor[] make defense. Air units don't do damage.
-            [royal]Second Phase (15min)[]: Air units do damage.
-            [royal]Sudden Death[]: [yellow]Survivors[] won, but [forest]Plague[] multiplies in strength. [yellow]Survive[] as long as possible.
-            
-            Full Rules in discord. Use [accent]/discord[] command.
+            [gold]PLAGUE[]
+            [yellow]Survivor[]: Build defenses and protect your core.
+            [green]Plague[]: Build units and conquer the Survivors.
+            Choose in the popup. Backup: [gold]/survivor[] or [gold]/plague[]. Full rules: [accent]/discord[].
             """.trimIndent()
         )
     }

@@ -50,6 +50,7 @@ import mindustry.maps.MapException
 import mindustry.net.Administration
 import mindustry.net.Administration.ActionType
 import mindustry.net.Administration.Config
+import mindustry.net.NetConnection
 import mindustry.net.Packets.KickReason
 import mindustry.server.ServerControl
 import mindustry.type.UnitType
@@ -64,8 +65,10 @@ import mindustry.world.blocks.storage.StorageBlock.StorageBuild
 import mindustry.world.blocks.units.Reconstructor.ReconstructorBuild
 import mindustry.world.blocks.units.UnitFactory
 import mindustry.world.blocks.units.UnitFactory.UnitFactoryBuild
+import mindustry.ui.Menus as MindustryMenus
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.pow
@@ -94,6 +97,14 @@ class PlagueHandler : Handler {
 
     private var cachedSafeCornerTilePosition: Int? = null
 
+    private val pendingRoleChoices = PendingRoleChoiceRegistry<String, Player, NetConnection>()
+
+    private val completedRoleChoices = PendingRoleChoiceRegistry<String, Player, NetConnection>()
+
+    private val roleChoiceMapGeneration = AtomicLong(0)
+
+    private var roleChoiceMenuId = -1
+
     private enum class SurvivorCreationResult {
         CREATED,
         JOINED,
@@ -111,8 +122,18 @@ class PlagueHandler : Handler {
         fun isValidSurvivorTeam(team: Team) = team.id > 6
     }
 
+    private fun registerRoleChoiceMenu() {
+        var menuId = -1
+        menuId = MindustryMenus.registerMenu { player, option ->
+            onRoleChoiceSelected(player, option, menuId)
+        }
+        roleChoiceMenuId = menuId
+    }
+
     override suspend fun onInit() {
         Genesis.commandRegistry.removeCommand("sync")
+
+        registerRoleChoiceMenu()
 
         // Store for restoring on every SecondPhase
         storeUnitWeapons(UnitTypes.quad)
@@ -277,6 +298,10 @@ class PlagueHandler : Handler {
     }
 
     suspend fun changePlayerTeam(player: Player, team: Team) {
+        if (player.team() == Team.blue && team != Team.blue) {
+            cancelPendingRoleChoiceMenu(player)
+        }
+
         player.team(team)
 
         updatePlayerSpecificRules(player)
@@ -349,21 +374,189 @@ class PlagueHandler : Handler {
         }
     }
 
-    @Command(["plague"])
-    @Description("Change team to plague")
-    fun plague(sender: PlayerCommandSender) {
-        if (sender.player.team() == Team.malis)
-            return sender.sendError("You are already in plague team.")
+    private fun isConnectedForRoleChoice(player: Player): Boolean =
+        player.isAdded && player.con != null && !player.con.hasDisconnected
+
+    private fun isConnectedPendingRoleChoice(pending: PendingRoleChoice<Player, NetConnection>): Boolean =
+        pending.player.isAdded &&
+            pending.player.con === pending.connection &&
+            !pending.connection.hasDisconnected
+
+    private fun cancelPendingRoleChoiceMenu(player: Player) {
+        val connection = player.con ?: return
+        val pending = pendingRoleChoices.cancel(player.uuid(), player, connection)
+        if (!connection.hasDisconnected) {
+            Call.hideFollowUpMenu(connection, pending?.offerId ?: roleChoiceMenuId)
+        }
+    }
+
+    private fun onRoleChoiceSelected(player: Player, option: Int, menuId: Int) {
+        val connection = player.con ?: return
+        val pending = pendingRoleChoices.consume(player.uuid(), menuId, player, connection) ?: return
+        val shownMapGeneration = pending.mapGeneration
+        completedRoleChoices.offer(player.uuid(), shownMapGeneration, menuId, player, connection)
 
         runOnMindustryThread {
             runBlocking {
-                leaveSurvivorTeam(sender.player)
+                val isPrepare = PlagueVars.stateLock.withLock { PlagueVars.state == PlagueState.Prepare }
+                val selectionIsValid = RoleChoiceRules.canApplySelection(
+                    shownMapGeneration = shownMapGeneration,
+                    currentMapGeneration = roleChoiceMapGeneration.get(),
+                    isPrepare = isPrepare,
+                    isUnassigned = player.team() == Team.blue,
+                    hasSurvivorTeam = survivorTeamsData.isNotEmpty(),
+                    isConnected = isConnectedForRoleChoice(player),
+                )
 
-                changePlayerTeam(sender.player, Team.malis)
+                if (!selectionIsValid) {
+                    if (isConnectedForRoleChoice(player)) {
+                        player.sendMessage("[accent]That choice is no longer available. Your current team was kept.")
+                    }
+                    return@runBlocking
+                }
 
-                sender.player.unit().kill()
+                when (RoleChoiceRules.choiceForOption(option)) {
+                    RoleChoice.SURVIVOR -> joinAvailableSurvivorTeam(player, shownMapGeneration)
+                    RoleChoice.PLAGUE -> joinPlagueTeam(player, shownMapGeneration)
+                    RoleChoice.LATER -> player.sendMessage(
+                        "[accent]Choose before Prepare ends with [gold]/survivor[] or [gold]/plague[]. No choice becomes Plague."
+                    )
+                }
+            }
+        }
+    }
 
-                sender.sendSuccess("You are now in plague team.")
+    private suspend fun showRoleChoiceMenuIfEligible(player: Player) = survivorCreationMutex.withLock {
+        val connection = player.con ?: return@withLock
+        val mapGeneration = roleChoiceMapGeneration.get()
+        val isPrepare = PlagueVars.stateLock.withLock { PlagueVars.state == PlagueState.Prepare }
+        val shouldOffer = RoleChoiceRules.shouldOfferMenu(
+            isPrepare = isPrepare,
+            isUnassigned = player.team() == Team.blue,
+            hasSurvivorTeam = survivorTeamsData.isNotEmpty(),
+            isConnected = isConnectedForRoleChoice(player),
+        )
+
+        if (!shouldOffer) return@withLock
+
+        completedRoleChoices.peek(player.uuid())?.let { completed ->
+            if (
+                completed.mapGeneration == mapGeneration &&
+                completed.player === player &&
+                completed.connection === connection
+            ) return@withLock
+
+            if (isConnectedPendingRoleChoice(completed)) return@withLock
+            completedRoleChoices.cancel(player.uuid(), completed.player, completed.connection)
+        }
+
+        pendingRoleChoices.peek(player.uuid())?.let { existing ->
+            if (isConnectedPendingRoleChoice(existing)) return@withLock
+            pendingRoleChoices.cancel(player.uuid(), existing.player, existing.connection)
+        }
+        if (!pendingRoleChoices.offer(player.uuid(), mapGeneration, roleChoiceMenuId, player, connection)) return@withLock
+
+        Call.followUpMenu(
+            connection,
+            roleChoiceMenuId,
+            "[gold]Choose Your Side[]",
+            "[white]Pick now, or choose later before Prepare ends.[]",
+            arrayOf(
+                arrayOf("[yellow]Survivor[]\n[lightgray]Build towers and defend your core[]"),
+                arrayOf("[green]Plague[]\n[lightgray]Build units and conquer Survivors[]"),
+                arrayOf("[gray]Choose Later[]\n[lightgray]Use /survivor or /plague[]"),
+            ),
+        )
+    }
+
+    private suspend fun joinAvailableSurvivorTeam(player: Player, expectedMapGeneration: Long): Boolean =
+        survivorCreationMutex.withLock {
+            val isPrepare = PlagueVars.stateLock.withLock { PlagueVars.state == PlagueState.Prepare }
+            if (
+                expectedMapGeneration != roleChoiceMapGeneration.get() ||
+                !isPrepare ||
+                player.team() != Team.blue ||
+                !isConnectedForRoleChoice(player)
+            ) {
+                player.sendMessage("[accent]Survivor selection is no longer available.")
+                return@withLock false
+            }
+
+            val selectedTeamId = SurvivorTeamChoiceRules.chooseTeamId(
+                survivorTeamsData.map { (team, data) ->
+                    SurvivorTeamCandidate(
+                        teamId = team.id,
+                        locked = data.locked,
+                        blacklisted = teamsPlayersUUIDBlacklist[team]?.contains(player.uuid()) == true,
+                        hasCore = Vars.state.teams[team].cores.size > 0,
+                    )
+                }
+            )
+            val selectedTeam = survivorTeamsData.keys.find { it.id == selectedTeamId }
+            val selectedTeamData = selectedTeam?.let { survivorTeamsData[it] }
+            val selectedCore = selectedTeam?.let { Vars.state.teams[it].cores.firstOrNull() }
+
+            if (selectedTeam == null || selectedTeamData == null || selectedCore == null) {
+                player.sendMessage(
+                    "[accent]No open Survivor team is available. Fly to a clear area and use [gold]/survivor[] to start one."
+                )
+                return@withLock false
+            }
+
+            val playerWasAdded = selectedTeamData.playersUUID.add(player.uuid())
+            try {
+                changePlayerTeam(player, selectedTeam)
+                if (!player.dead()) player.unit().kill()
+                CoreBlock.playerSpawn(selectedCore.tile, player)
+                player.sendMessage("[green]You joined the '${selectedTeam.name}' Survivor team.")
+                true
+            } catch (error: Exception) {
+                if (playerWasAdded) selectedTeamData.playersUUID.remove(player.uuid())
+                player.team(Team.blue)
+                player.setRules(Vars.state.rules)
+                Logger.error("Failed to join Survivor team from role menu: ${error.message}")
+                player.sendMessage("[scarlet]Could not join the Survivor team. Use /survivor or try again.")
+                false
+            }
+        }
+
+    private suspend fun joinPlagueTeam(player: Player, expectedMapGeneration: Long? = null): Boolean =
+        survivorCreationMutex.withLock {
+            if (expectedMapGeneration != null) {
+                val isPrepare = PlagueVars.stateLock.withLock { PlagueVars.state == PlagueState.Prepare }
+                if (
+                    expectedMapGeneration != roleChoiceMapGeneration.get() ||
+                    !isPrepare ||
+                    player.team() != Team.blue ||
+                    !isConnectedForRoleChoice(player)
+                ) {
+                    player.sendMessage("[accent]Plague selection is no longer available.")
+                    return@withLock false
+                }
+            }
+
+            if (player.team() == Team.malis) {
+                player.sendMessage("[accent]You are already on the Plague team.")
+                return@withLock false
+            }
+
+            if (isValidSurvivorTeam(player.team())) leaveSurvivorTeam(player)
+            changePlayerTeam(player, Team.malis)
+            if (player.dead()) {
+                getHigestRandomPlagueCore()?.let { CoreBlock.playerSpawn(it.tile, player) }
+            } else {
+                player.unit().kill()
+            }
+            player.sendMessage("[green]You joined the Plague team.")
+            true
+        }
+
+    @Command(["plague"])
+    @Description("Change team to plague")
+    fun plague(sender: PlayerCommandSender) {
+        runOnMindustryThread {
+            runBlocking {
+                joinPlagueTeam(sender.player)
             }
         }
     }
@@ -1147,6 +1340,10 @@ class PlagueHandler : Handler {
             // Clear this before connection confirmation can assign players for the new map.
             survivorTeamsData.clear()
             teamsPlayersUUIDBlacklist.clear()
+            pendingRoleChoices.clear()
+            completedRoleChoices.clear()
+            roleChoiceMapGeneration.incrementAndGet()
+            registerRoleChoiceMenu()
             lastMinuteUpdatesInMapTimeMinute = -1
             cornerSearchComplete = false
             cachedSafeCornerTilePosition = null
@@ -1185,6 +1382,11 @@ class PlagueHandler : Handler {
 
     @EventHandler(true)
     fun onPlayerLeave(event: EventType.PlayerLeave) {
+        event.player.con?.let { connection ->
+            pendingRoleChoices.cancel(event.player.uuid(), event.player, connection)
+            completedRoleChoices.cancel(event.player.uuid(), event.player, connection)
+        }
+
         val teamOwned = survivorTeamsData.entries.find { it.value.ownerUUID == event.player.uuid() }
 
         if (teamOwned == null) return
@@ -1215,6 +1417,9 @@ class PlagueHandler : Handler {
             if (mayRestart) {
                 survivorTeamsData.clear()
                 teamsPlayersUUIDBlacklist.clear()
+                pendingRoleChoices.clear()
+                completedRoleChoices.clear()
+                roleChoiceMapGeneration.incrementAndGet()
                 lastMinuteUpdatesInMapTimeMinute = -1
                 cornerSearchComplete = false
                 cachedSafeCornerTilePosition = null
@@ -1344,32 +1549,34 @@ class PlagueHandler : Handler {
      */
     @EventHandler(true)
     fun onPlayerConnectionConfirmed(event: EventType.PlayerConnectionConfirmed) {
-        if (!event.player.dead()) return
-
         runBlocking {
-            val shouldCreateFirstSurvivor = PlagueVars.stateLock.withLock {
-                PlagueVars.state == PlagueState.Prepare &&
-                    event.player.team() == Team.blue &&
-                    survivorTeamsData.isEmpty()
-            }
-
-            if (shouldCreateFirstSurvivor) {
-                val cornerTile = findValidSurvivorCornerTile()
-
-                if (cornerTile != null) {
-                    createSurvivorCore(
-                        event.player,
-                        cornerTile,
-                        SurvivorCreationSource.AUTOMATIC,
-                        requireFirstSurvivor = true,
-                    )
-                } else {
-                    event.player.sendMessage("[scarlet]No safe corner core position was found. Fly to a clear area and type /survivor.")
+            if (event.player.dead()) {
+                val shouldCreateFirstSurvivor = PlagueVars.stateLock.withLock {
+                    PlagueVars.state == PlagueState.Prepare &&
+                        event.player.team() == Team.blue &&
+                        survivorTeamsData.isEmpty()
                 }
+
+                if (shouldCreateFirstSurvivor) {
+                    val cornerTile = findValidSurvivorCornerTile()
+
+                    if (cornerTile != null) {
+                        createSurvivorCore(
+                            event.player,
+                            cornerTile,
+                            SurvivorCreationSource.AUTOMATIC,
+                            requireFirstSurvivor = true,
+                        )
+                    } else {
+                        event.player.sendMessage("[scarlet]No safe corner core position was found. Fly to a clear area and type /survivor.")
+                    }
+                }
+
+                // Initialize HUD and player-specific rules after team/spawn selection.
+                setupPlayer(event.player)
             }
 
-            // Always initialize HUD and player-specific rules after team/spawn selection.
-            setupPlayer(event.player)
+            showRoleChoiceMenuIfEligible(event.player)
         }
     }
 
@@ -1434,6 +1641,12 @@ class PlagueHandler : Handler {
         if (!phaseStarted) return
 
         runOnMindustryThread {
+            pendingRoleChoices.clear().forEach { pending ->
+                if (isConnectedPendingRoleChoice(pending)) {
+                    Call.hideFollowUpMenu(pending.connection, pending.offerId)
+                }
+            }
+
             Vars.state.rules.enemyCoreBuildRadius = Vars.state.map.rules().enemyCoreBuildRadius
 
             if (!Vars.state.teams.active.any { isValidSurvivorTeam(it.team) }) {
