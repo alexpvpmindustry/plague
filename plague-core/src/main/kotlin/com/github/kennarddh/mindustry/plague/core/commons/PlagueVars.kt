@@ -22,6 +22,7 @@ object PlagueVars {
     val stateLock = Mutex()
 
     lateinit var mapStartTime: Instant
+    val prepareTimer = PrepareTimer()
     var totalMapSkipDuration: Duration = 0.seconds
 
     val mapTime: Duration

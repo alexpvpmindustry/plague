@@ -33,6 +33,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.datetime.Clock
+import kotlinx.datetime.Instant
 import mindustry.Vars
 import mindustry.content.Blocks
 import mindustry.content.UnitTypes
@@ -896,6 +897,17 @@ class PlagueHandler : Handler {
 
         if (Vars.state.gameOver) return
 
+        PlagueVars.stateLock.withLock {
+            if (PlagueVars.state == PlagueState.Prepare) {
+                val now = Clock.System.now()
+                val elapsedMillis = PlagueVars.prepareTimer.elapsedMillis(
+                    now.toEpochMilliseconds(),
+                    Groups.player.size()
+                )
+                PlagueVars.mapStartTime = Instant.fromEpochMilliseconds(now.toEpochMilliseconds() - elapsedMillis)
+            }
+        }
+
         // Make sure blue team units cannot be killed
         Groups.unit.forEach {
             if (it.team != Team.blue) return@forEach
@@ -980,6 +992,7 @@ class PlagueHandler : Handler {
 
         PlagueVars.totalMapSkipDuration = 0.seconds
         PlagueVars.mapStartTime = Clock.System.now()
+        PlagueVars.prepareTimer.elapsedMillis(PlagueVars.mapStartTime.toEpochMilliseconds(), 0)
 
         // Clear mono tree units weapons on every map start
         clearUnitWeapons(UnitTypes.alpha)

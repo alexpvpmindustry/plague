@@ -60,7 +60,7 @@ jobs:
 
       - name: Build Plague for Mindustry v159.3
         run: |
-          ./gradlew --no-daemon clean :plague-core:jar \
+          ./gradlew --no-daemon clean :plague-core:test :plague-core:jar \
             -PmindustryServerJar="$GITHUB_WORKSPACE/ci-libs/server-release.jar" \
             -PkotlinRuntimeJar="$GITHUB_WORKSPACE/ci-libs/kotlin-runtime.jar" \
             -PgenesisCoreJar="$GITHUB_WORKSPACE/ci-libs/genesis-core.jar" \
