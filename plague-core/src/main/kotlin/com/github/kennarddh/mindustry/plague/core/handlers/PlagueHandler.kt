@@ -307,6 +307,27 @@ class PlagueHandler : Handler {
         updatePlayerSpecificRules(player)
     }
 
+    private suspend fun prepareSurvivorVictory(preferredWinnerTeams: List<Team> = emptyList()): Team? {
+        val players = Groups.player.toList()
+        val survivorSideTeams = Team.all.filter { isValidSurvivorTeam(it) }.toSet()
+        val winnerCandidates = (
+            preferredWinnerTeams +
+                survivorTeamsData.keys +
+                players.map { it.team() }.filter { isValidSurvivorTeam(it) }
+            ).distinct()
+        val plan = RoundEndRules.createSurvivorVictoryPlan(
+            winnerCandidates,
+            survivorSideTeams,
+            players.map { it.team() },
+        ) ?: return null
+
+        players.zip(plan.normalizedPlayerTeams).forEach { (player, team) ->
+            if (player.team() != team) changePlayerTeam(player, team)
+        }
+
+        return plan.winnerTeam
+    }
+
     suspend fun onSurvivorTeamDestroyed() {
         val state = PlagueVars.stateLock.withLock { PlagueVars.state }
 
@@ -317,16 +338,17 @@ class PlagueHandler : Handler {
         if (survivorTeamsData.isNotEmpty()) return
 
         if (state == PlagueState.SuddenDeath) {
-            Call.infoMessage("[green]All survivors have been destroyed.")
-
-            restart(Team.derelict)
-
+            restartWithWinner {
+                Call.infoMessage("[green]All survivors have been destroyed. Plague team won the game.")
+                Team.malis
+            }
             return
         }
 
-        Call.infoMessage("[green]Plague team won the game.")
-
-        restart(Team.malis)
+        restartWithWinner {
+            Call.infoMessage("[green]Plague team won the game.")
+            Team.malis
+        }
     }
 
     fun leaveSurvivorTeam(player: Player) {
@@ -893,9 +915,32 @@ class PlagueHandler : Handler {
 
         val coreBuild = event.tile.build as CoreBuild
 
-        if (!survivorTeamsData.contains(coreBuild.team)) return
+        if (coreBuild.team == Team.malis) {
+            if (!RoundEndRules.isLastCoreBeforeRemoval(coreBuild.team.cores().size)) return
 
-        if (coreBuild.team.cores().size != 0) return
+            restartWithWinner {
+                val winnerTeam = prepareSurvivorVictory()
+                when (RoundEndRules.winnerWhenPlagueCoreDestroyed(winnerTeam != null)) {
+                    RoundWinner.PLAGUE -> {
+                        Call.infoMessage("[green]Plague team won the game. No Survivor team remained.")
+                        Team.malis
+                    }
+
+                    RoundWinner.SURVIVORS -> {
+                        Call.infoMessage("[green]The Plague core was destroyed. Survivor teams won the game.")
+                        requireNotNull(winnerTeam)
+                    }
+                }
+            }
+            return
+        }
+
+        // Claim the team before cleanup. clearTeam() can try to kill this same core again.
+        RoundEndRules.claimEliminatedTeam(
+            coreBuild.team,
+            coreBuild.team.cores().size,
+            survivorTeamsData,
+        ) ?: return
 
         val teamData = Vars.state.teams[coreBuild.team]
 
@@ -912,8 +957,6 @@ class PlagueHandler : Handler {
         }
 
         CoroutineScopes.Main.launch {
-            survivorTeamsData.remove(coreBuild.team)
-
             onSurvivorTeamDestroyed()
         }
     }
@@ -1403,16 +1446,20 @@ class PlagueHandler : Handler {
             }
     }
 
-    suspend fun restart(winner: Team) {
-        val shouldRestart = survivorCreationMutex.withLock {
+    suspend fun restart(winner: Team) = restartWithWinner { winner }
+
+    private suspend fun restartWithWinner(resolveWinner: suspend () -> Team) {
+        val winner = survivorCreationMutex.withLock {
             val mayRestart = PlagueVars.stateLock.withLock {
-                if (PlagueVars.state == PlagueState.GameOver) {
+                if (!RoundEndRules.canClaimGameOver(PlagueVars.state)) {
                     false
                 } else {
                     PlagueVars.state = PlagueState.GameOver
                     true
                 }
             }
+
+            val resolvedWinner = if (mayRestart) resolveWinner() else null
 
             if (mayRestart) {
                 survivorTeamsData.clear()
@@ -1425,10 +1472,8 @@ class PlagueHandler : Handler {
                 cachedSafeCornerTilePosition = null
             }
 
-            mayRestart
-        }
-
-        if (!shouldRestart) return
+            resolvedWinner
+        } ?: return
 
         activePlagueAttackerUnitsMutex.withLock {
             activePlagueAttackerUnits.clear()
@@ -1650,11 +1695,11 @@ class PlagueHandler : Handler {
             Vars.state.rules.enemyCoreBuildRadius = Vars.state.map.rules().enemyCoreBuildRadius
 
             if (!Vars.state.teams.active.any { isValidSurvivorTeam(it.team) }) {
-                // No survivors
-                Call.infoMessage("No survivors.")
-
                 CoroutineScopes.Main.launch {
-                    restart(Team.derelict)
+                    restartWithWinner {
+                        Call.infoMessage("No survivors. Plague team won the game.")
+                        Team.malis
+                    }
                 }
 
                 return@runOnMindustryThread
@@ -1676,9 +1721,16 @@ class PlagueHandler : Handler {
     }
 
     private suspend fun onSecondPhase() {
-        PlagueVars.stateLock.withLock {
-            PlagueVars.state = PlagueState.PlayingSecondPhase
+        val phaseStarted = PlagueVars.stateLock.withLock {
+            if (!RoundEndRules.canStartSecondPhase(PlagueVars.state)) {
+                false
+            } else {
+                PlagueVars.state = PlagueState.PlayingSecondPhase
+                true
+            }
         }
+
+        if (!phaseStarted) return
 
         // Restore mono tree units weapons
         restoreUnitWeapons(UnitTypes.quad)
@@ -1707,27 +1759,47 @@ class PlagueHandler : Handler {
     }
 
     private suspend fun onSuddenDeath() {
-        PlagueVars.stateLock.withLock {
-            PlagueVars.state = PlagueState.SuddenDeath
+        val phaseStarted = PlagueVars.stateLock.withLock {
+            if (!RoundEndRules.canStartTimeLimitEnd(PlagueVars.state)) {
+                false
+            } else {
+                PlagueVars.state = PlagueState.SuddenDeath
+                true
+            }
         }
 
-        runOnMindustryThread {
-            runBlocking {
-                updateAllPlayerSpecificRules()
+        if (!phaseStarted) return
+
+        restartWithWinner {
+            runOnMindustryThreadSuspended {
+                runBlocking {
+                    updateAllPlayerSpecificRules()
+                }
+
+                val survivorTeams = Vars.state.teams.active.toList().filter { isValidSurvivorTeam(it.team) }
+
+                when (RoundEndRules.winnerAtTimeLimit(survivorTeams.size)) {
+                    RoundWinner.PLAGUE -> {
+                        Call.infoMessage("[green]Plague team won the game. No Survivor team remained.")
+                        Team.malis
+                    }
+
+                    RoundWinner.SURVIVORS -> {
+                        val winnerTeam = runBlocking {
+                            prepareSurvivorVictory(survivorTeams.map { it.team })
+                                ?: error("Survivor winner disappeared during game-over resolution")
+                        }
+                        Call.infoMessage(
+                            """
+                            [green]Survivor teams won.
+                            [green]${survivorTeams.joinToString(", ") { "'${it.team.name}'" }} survived the time limit.
+                            [scarlet]Plague lost.
+                            """.trimIndent()
+                        )
+                        winnerTeam
+                    }
+                }
             }
-
-            val survivorTeams = Vars.state.teams.active.toList().filter { isValidSurvivorTeam(it.team) }
-
-            if (survivorTeams.isEmpty()) return@runOnMindustryThread
-
-            Call.infoMessage(
-                """
-            [green]Survivor teams won.
-            [green]${survivorTeams.joinToString(", ") { "'${it.team.name}'" }} won.
-            [scarlet]Plague lost.
-            [white]Game will still continue.
-            """.trimIndent()
-            )
         }
     }
 
