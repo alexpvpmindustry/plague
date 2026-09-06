@@ -14,6 +14,7 @@ import com.github.kennarddh.mindustry.genesis.standard.commands.parameters.valid
 import com.github.kennarddh.mindustry.plague.core.commands.validations.Admin
 import com.github.kennarddh.mindustry.plague.core.commons.PlagueVars
 import com.github.kennarddh.mindustry.plague.core.commons.extensions.toDisplayString
+import kotlinx.coroutines.runBlocking
 import mindustry.Vars
 import mindustry.game.Team
 import mindustry.gen.Player
@@ -157,9 +158,13 @@ class CheatHandler : Handler {
         if (player == null) return sender.sendError("Player cannot be null.")
         
         runOnMindustryThread {
-            player.team(team)
+            runBlocking {
+                val plagueHandler = Genesis.getHandler<PlagueHandler>()
+                    ?: return@runBlocking sender.sendError("Plague handler is unavailable.")
+                plagueHandler.changePlayerTeam(player, team)
 
-            sender.sendSuccess("Changed '${player.plainName()}' team to '${team.name}'.")
+                sender.sendSuccess("Changed '${player.plainName()}' team to '${team.name}'.")
+            }
         }
     }
 }

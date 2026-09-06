@@ -87,6 +87,16 @@ class PlagueHandler : Handler {
 
     private var lastMinuteUpdatesInMapTimeMinute: Long = -1
 
+    private var lastRoundHistorySampleSecond: Long = -1
+
+    private val roundHistory by lazy {
+        RoundHistoryRecorder(
+            historyFile = Vars.dataDirectory.child("plague").child("round-history.jsonl").file().toPath(),
+            onWriteFailure = { error -> Logger.error("Failed to write round history: ${error.message}") },
+            asyncWrites = true,
+        )
+    }
+
     private val activePlagueAttackerUnits = mutableListOf<mindustry.gen.Unit>()
 
     private val activePlagueAttackerUnitsMutex = Mutex()
@@ -120,6 +130,28 @@ class PlagueHandler : Handler {
 
     companion object {
         fun isValidSurvivorTeam(team: Team) = team.id > 6
+    }
+
+    private fun currentRoundPlayerCounts(excludedPlayer: Player? = null): RoundPlayerCounts {
+        val players = Groups.player.toList().filter { it !== excludedPlayer }
+        return RoundPlayerCounts(
+            plague = players.count { it.team() == Team.malis },
+            survivors = players.count { isValidSurvivorTeam(it.team()) },
+            other = players.count { it.team() != Team.malis && !isValidSurvivorTeam(it.team()) },
+        )
+    }
+
+    private suspend fun observeCurrentRoundPlayers(excludedPlayer: Player? = null) {
+        val roundIsActive = PlagueVars.stateLock.withLock { PlagueVars.state != PlagueState.GameOver }
+        if (roundIsActive) {
+            roundHistory.observePlayers(currentRoundPlayerCounts(excludedPlayer))
+        }
+    }
+
+    private fun roundSideFor(team: Team): RoundSide = when {
+        team == Team.malis -> RoundSide.PLAGUE
+        isValidSurvivorTeam(team) -> RoundSide.SURVIVORS
+        else -> RoundSide.OTHER
     }
 
     private fun registerRoleChoiceMenu() {
@@ -305,6 +337,7 @@ class PlagueHandler : Handler {
         player.team(team)
 
         updatePlayerSpecificRules(player)
+        observeCurrentRoundPlayers()
     }
 
     private suspend fun prepareSurvivorVictory(preferredWinnerTeams: List<Team> = emptyList()): Team? {
@@ -328,7 +361,7 @@ class PlagueHandler : Handler {
         return plan.winnerTeam
     }
 
-    suspend fun onSurvivorTeamDestroyed() {
+    suspend fun onSurvivorTeamDestroyed(reason: RoundEndReason) {
         val state = PlagueVars.stateLock.withLock { PlagueVars.state }
 
         if (state == PlagueState.GameOver) return
@@ -338,14 +371,14 @@ class PlagueHandler : Handler {
         if (survivorTeamsData.isNotEmpty()) return
 
         if (state == PlagueState.SuddenDeath) {
-            restartWithWinner {
+            restartWithWinner(reason) {
                 Call.infoMessage("[green]All survivors have been destroyed. Plague team won the game.")
                 Team.malis
             }
             return
         }
 
-        restartWithWinner {
+        restartWithWinner(reason) {
             Call.infoMessage("[green]Plague team won the game.")
             Team.malis
         }
@@ -377,7 +410,7 @@ class PlagueHandler : Handler {
                 clearTeam(teamData.team)
 
                 CoroutineScopes.Main.launch {
-                    onSurvivorTeamDestroyed()
+                    onSurvivorTeamDestroyed(RoundEndReason.ALL_SURVIVOR_PLAYERS_LEFT)
                 }
             }
 
@@ -536,6 +569,7 @@ class PlagueHandler : Handler {
                 if (playerWasAdded) selectedTeamData.playersUUID.remove(player.uuid())
                 player.team(Team.blue)
                 player.setRules(Vars.state.rules)
+                observeCurrentRoundPlayers()
                 Logger.error("Failed to join Survivor team from role menu: ${error.message}")
                 player.sendMessage("[scarlet]Could not join the Survivor team. Use /survivor or try again.")
                 false
@@ -918,7 +952,7 @@ class PlagueHandler : Handler {
         if (coreBuild.team == Team.malis) {
             if (!RoundEndRules.isLastCoreBeforeRemoval(coreBuild.team.cores().size)) return
 
-            restartWithWinner {
+            restartWithWinner(RoundEndReason.PLAGUE_CORE_DESTROYED) {
                 val winnerTeam = prepareSurvivorVictory()
                 when (RoundEndRules.winnerWhenPlagueCoreDestroyed(winnerTeam != null)) {
                     RoundWinner.PLAGUE -> {
@@ -957,7 +991,7 @@ class PlagueHandler : Handler {
         }
 
         CoroutineScopes.Main.launch {
-            onSurvivorTeamDestroyed()
+            onSurvivorTeamDestroyed(RoundEndReason.LAST_SURVIVOR_CORE_DESTROYED)
         }
     }
 
@@ -1110,6 +1144,7 @@ class PlagueHandler : Handler {
                 if (tile.build?.team == closestEnemyCoreInRange.team) tile.removeNet()
                 player.team(Team.blue)
                 player.setRules(Vars.state.rules)
+                observeCurrentRoundPlayers()
                 Logger.error("Failed to join Survivor team: ${error.message}")
                 player.sendMessage("[scarlet]Could not create the Survivor core. Please try again.")
                 return@withLock SurvivorCreationResult.FAILED
@@ -1152,6 +1187,7 @@ class PlagueHandler : Handler {
             if (tile.build?.team == newTeam) tile.removeNet()
             player.team(Team.blue)
             player.setRules(Vars.state.rules)
+            observeCurrentRoundPlayers()
             Logger.error("Failed to create Survivor team: ${error.message}")
             player.sendMessage("[scarlet]Could not create the Survivor core. Please try again.")
             return@withLock SurvivorCreationResult.FAILED
@@ -1289,6 +1325,12 @@ class PlagueHandler : Handler {
 
         if (Vars.state.gameOver) return
 
+        val currentRoundSecond = PlagueVars.mapTime.inWholeSeconds
+        if (lastRoundHistorySampleSecond != currentRoundSecond) {
+            lastRoundHistorySampleSecond = currentRoundSecond
+            observeCurrentRoundPlayers()
+        }
+
         PlagueVars.stateLock.withLock {
             if (PlagueVars.state == PlagueState.Prepare) {
                 val now = Clock.System.now()
@@ -1388,6 +1430,7 @@ class PlagueHandler : Handler {
             roleChoiceMapGeneration.incrementAndGet()
             registerRoleChoiceMenu()
             lastMinuteUpdatesInMapTimeMinute = -1
+            lastRoundHistorySampleSecond = -1
             cornerSearchComplete = false
             cachedSafeCornerTilePosition = null
 
@@ -1399,6 +1442,8 @@ class PlagueHandler : Handler {
         PlagueVars.totalMapSkipDuration = 0.seconds
         PlagueVars.mapStartTime = Clock.System.now()
         PlagueVars.prepareTimer.elapsedMillis(PlagueVars.mapStartTime.toEpochMilliseconds(), 0)
+        roundHistory.startRound(Vars.state.map.plainName())
+        observeCurrentRoundPlayers()
 
         // Clear mono tree units weapons on every map start
         clearUnitWeapons(UnitTypes.alpha)
@@ -1429,6 +1474,9 @@ class PlagueHandler : Handler {
             pendingRoleChoices.cancel(event.player.uuid(), event.player, connection)
             completedRoleChoices.cancel(event.player.uuid(), event.player, connection)
         }
+        runBlocking {
+            observeCurrentRoundPlayers(excludedPlayer = event.player)
+        }
 
         val teamOwned = survivorTeamsData.entries.find { it.value.ownerUUID == event.player.uuid() }
 
@@ -1446,10 +1494,13 @@ class PlagueHandler : Handler {
             }
     }
 
-    suspend fun restart(winner: Team) = restartWithWinner { winner }
+    suspend fun restart(winner: Team) = restartWithWinner(RoundEndReason.MANUAL) { winner }
 
-    private suspend fun restartWithWinner(resolveWinner: suspend () -> Team) {
-        val winner = survivorCreationMutex.withLock {
+    private suspend fun restartWithWinner(
+        reason: RoundEndReason,
+        resolveWinner: suspend () -> Team,
+    ) {
+        val restartResult = survivorCreationMutex.withLock {
             val mayRestart = PlagueVars.stateLock.withLock {
                 if (!RoundEndRules.canClaimGameOver(PlagueVars.state)) {
                     false
@@ -1458,22 +1509,38 @@ class PlagueHandler : Handler {
                     true
                 }
             }
+            if (!mayRestart) return@withLock null
 
-            val resolvedWinner = if (mayRestart) resolveWinner() else null
-
-            if (mayRestart) {
-                survivorTeamsData.clear()
-                teamsPlayersUUIDBlacklist.clear()
-                pendingRoleChoices.clear()
-                completedRoleChoices.clear()
-                roleChoiceMapGeneration.incrementAndGet()
-                lastMinuteUpdatesInMapTimeMinute = -1
-                cornerSearchComplete = false
-                cachedSafeCornerTilePosition = null
+            var resolutionFailed = false
+            val endPlayers = try {
+                runOnMindustryThreadSuspended { currentRoundPlayerCounts() }
+            } catch (error: Exception) {
+                resolutionFailed = true
+                Logger.error("Failed to capture final round player counts: ${error.message}")
+                RoundPlayerCounts(plague = 0, survivors = 0, other = 0)
+            }
+            val resolvedWinner = try {
+                resolveWinner()
+            } catch (error: Exception) {
+                resolutionFailed = true
+                Logger.error("Failed to resolve round winner: ${error.message}")
+                null
             }
 
-            resolvedWinner
+            survivorTeamsData.clear()
+            teamsPlayersUUIDBlacklist.clear()
+            pendingRoleChoices.clear()
+            completedRoleChoices.clear()
+            roleChoiceMapGeneration.incrementAndGet()
+            lastMinuteUpdatesInMapTimeMinute = -1
+            lastRoundHistorySampleSecond = -1
+            cornerSearchComplete = false
+            cachedSafeCornerTilePosition = null
+
+            Triple(resolvedWinner, endPlayers, resolutionFailed)
         } ?: return
+
+        val (winner, endPlayers, resolutionFailed) = restartResult
 
         activePlagueAttackerUnitsMutex.withLock {
             activePlagueAttackerUnits.clear()
@@ -1481,36 +1548,68 @@ class PlagueHandler : Handler {
 
         val roundExtraTimeDuration = Config.roundExtraTime.num().seconds
 
-        val map = runOnMindustryThreadSuspended {
-            val map = Vars.maps.getNextMap(ServerControl.instance.lastMode, Vars.state.map)
-
-            if (map == null) {
-                Vars.netServer.kickAll(KickReason.gameover)
-                Vars.state.set(GameState.State.menu)
-                Vars.net.closeServer()
-
-                return@runOnMindustryThreadSuspended null
+        val fallbackMap = Vars.state.map
+        val map = try {
+            runOnMindustryThreadSuspended {
+            val selectedMap = try {
+                Vars.maps.getNextMap(ServerControl.instance.lastMode, Vars.state.map)
+            } catch (error: Exception) {
+                Logger.error("Failed to select the next map; replaying the current map: ${error.message}")
+                null
+            }
+            val map = selectedMap ?: Vars.state.map.also {
+                Logger.warn("No next map was available; replaying '${it.plainName()}'.")
             }
 
-            Call.infoMessage(
-                """
-                [scarlet]Game over!
-                [white]Next selected map: [white]${map.name()}[white]${if (map.hasTag("author")) " by [white]${map.author()}" else ""}.
-                [white]New game begins in ${roundExtraTimeDuration.toDisplayString()}.
-                """.trimIndent()
-            )
+            runCatching {
+                Call.infoMessage(
+                    """
+                    [scarlet]Game over!
+                    [white]Next selected map: [white]${map.name()}[white]${if (map.hasTag("author")) " by [white]${map.author()}" else ""}.
+                    [white]New game begins in ${roundExtraTimeDuration.toDisplayString()}.
+                    """.trimIndent()
+                )
+            }.onFailure { Logger.error("Failed to send game-over message: ${it.message}") }
 
-            Call.updateGameOver(winner)
+            val publicationSucceeded = if (!resolutionFailed && winner != null) {
+                try {
+                    Call.updateGameOver(winner)
+                    true
+                } catch (error: Exception) {
+                    Logger.error("Failed to publish game-over winner: ${error.message}")
+                    false
+                }
+            } else {
+                false
+            }
+
+            when {
+                resolutionFailed || winner == null -> roundHistory.interruptRound(
+                    RoundInterruptionReason.ROUND_RESOLUTION_FAILED,
+                    endPlayers,
+                )
+                !publicationSucceeded -> roundHistory.interruptRound(
+                    RoundInterruptionReason.GAME_OVER_PUBLICATION_FAILED,
+                    endPlayers,
+                )
+                else -> roundHistory.completeRound(roundSideFor(winner), reason, endPlayers)
+            }
 
             Logger.info("Selected next map to be '${map.plainName()}'.")
 
             ServerControl.instance.inGameOverWait = true
 
             // TODO: When v147 released replace this with ServerControl.instance.cancelPlayTask()
-            Reflect.get<Timer.Task>(ServerControl.instance, "lastTask")?.cancel()
+            runCatching { Reflect.get<Timer.Task>(ServerControl.instance, "lastTask")?.cancel() }
+                .onFailure { Logger.error("Failed to cancel prior map task: ${it.message}") }
 
-            return@runOnMindustryThreadSuspended map
-        } ?: return
+                return@runOnMindustryThreadSuspended map
+            } ?: fallbackMap
+        } catch (error: Exception) {
+            Logger.error("Post-game transition failed; replaying the current map: ${error.message}")
+            roundHistory.interruptRound(RoundInterruptionReason.POST_CLAIM_TRANSITION_FAILED, endPlayers)
+            fallbackMap
+        }
 
         delay(roundExtraTimeDuration)
 
@@ -1622,6 +1721,7 @@ class PlagueHandler : Handler {
             }
 
             showRoleChoiceMenuIfEligible(event.player)
+            observeCurrentRoundPlayers()
         }
     }
 
@@ -1696,7 +1796,7 @@ class PlagueHandler : Handler {
 
             if (!Vars.state.teams.active.any { isValidSurvivorTeam(it.team) }) {
                 CoroutineScopes.Main.launch {
-                    restartWithWinner {
+                    restartWithWinner(RoundEndReason.NO_SURVIVORS) {
                         Call.infoMessage("No survivors. Plague team won the game.")
                         Team.malis
                     }
@@ -1770,7 +1870,7 @@ class PlagueHandler : Handler {
 
         if (!phaseStarted) return
 
-        restartWithWinner {
+        restartWithWinner(RoundEndReason.TIME_LIMIT) {
             runOnMindustryThreadSuspended {
                 runBlocking {
                     updateAllPlayerSpecificRules()
