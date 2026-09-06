@@ -134,10 +134,16 @@ class PlagueHandler : Handler {
 
     private fun currentRoundPlayerCounts(excludedPlayer: Player? = null): RoundPlayerCounts {
         val players = Groups.player.toList().filter { it !== excludedPlayer }
+        val plaguePlayers = players.filter { it.team() == Team.malis }
+        val survivorPlayers = players.filter { isValidSurvivorTeam(it.team()) }
+        val otherPlayers = players.filter { it.team() != Team.malis && !isValidSurvivorTeam(it.team()) }
         return RoundPlayerCounts(
-            plague = players.count { it.team() == Team.malis },
-            survivors = players.count { isValidSurvivorTeam(it.team()) },
-            other = players.count { it.team() != Team.malis && !isValidSurvivorTeam(it.team()) },
+            plague = plaguePlayers.size,
+            survivors = survivorPlayers.size,
+            other = otherPlayers.size,
+            plagueNames = plaguePlayers.map { it.plainName() }.sorted(),
+            survivorNames = survivorPlayers.map { it.plainName() }.sorted(),
+            otherNames = otherPlayers.map { it.plainName() }.sorted(),
         )
     }
 

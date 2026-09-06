@@ -40,6 +40,9 @@ data class RoundPlayerCounts(
     val plague: Int,
     val survivors: Int,
     val other: Int,
+    val plagueNames: List<String> = emptyList(),
+    val survivorNames: List<String> = emptyList(),
+    val otherNames: List<String> = emptyList(),
 ) {
     val total: Int = plague + survivors + other
 }
@@ -224,7 +227,14 @@ class RoundHistoryRecorder(
     }
 
     private fun countsJson(counts: RoundPlayerCounts) =
-        "{\"plague\":${counts.plague},\"survivors\":${counts.survivors},\"other\":${counts.other},\"total\":${counts.total}}"
+        "{\"plague\":${counts.plague},\"survivors\":${counts.survivors},\"other\":${counts.other},\"total\":${counts.total}," +
+            "\"names\":{" +
+            "\"plague\":${namesJson(counts.plagueNames)}," +
+            "\"survivors\":${namesJson(counts.survivorNames)}," +
+            "\"other\":${namesJson(counts.otherNames)}" +
+            "}}"
+
+    private fun namesJson(names: List<String>) = names.joinToString(prefix = "[", postfix = "]") { jsonString(it) }
 
     private fun loserFor(winner: RoundSide): String? = when (winner) {
         RoundSide.PLAGUE -> RoundSide.SURVIVORS.value
