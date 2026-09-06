@@ -36,6 +36,7 @@ dependencies {
     compileOnly(files(genesisStandardJar))
 
     implementation("org.slf4j:slf4j-api:2.0.11")
+    testImplementation(kotlin("test"))
 }
 
 configurations.runtimeClasspath {
@@ -53,6 +54,10 @@ kotlin {
 }
 
 tasks {
+    test {
+        useJUnitPlatform()
+    }
+
     jar {
         doFirst {
             val metadataFile = temporaryDir.resolve("plugin.json")
