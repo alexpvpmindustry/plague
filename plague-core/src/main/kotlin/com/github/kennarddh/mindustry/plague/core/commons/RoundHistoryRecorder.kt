@@ -68,6 +68,9 @@ class RoundHistoryRecorder(
     private var activeRound: ActiveRound? = null
 
     @Synchronized
+    fun currentRoundId(): String? = activeRound?.id
+
+    @Synchronized
     fun startRound(map: String) {
         val startedAt = nowEpochMillis()
         activeRound?.let { interrupted ->
