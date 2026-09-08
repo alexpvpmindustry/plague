@@ -62,6 +62,7 @@ import mindustry.world.blocks.payloads.UnitPayload
 import mindustry.world.blocks.storage.CoreBlock
 import mindustry.world.blocks.storage.CoreBlock.CoreBuild
 import mindustry.world.blocks.storage.StorageBlock.StorageBuild
+import mindustry.world.blocks.ConstructBlock.ConstructBuild
 import mindustry.world.blocks.units.Reconstructor.ReconstructorBuild
 import mindustry.world.blocks.units.UnitFactory
 import mindustry.world.blocks.units.UnitFactory.UnitFactoryBuild
@@ -89,12 +90,26 @@ class PlagueHandler : Handler {
 
     private var lastRoundHistorySampleSecond: Long = -1
 
+    private var lastPlayerActionSampleMillis: Long = 0
+
     private val roundHistory by lazy {
         RoundHistoryRecorder(
             historyFile = Vars.dataDirectory.child("plague").child("round-history.jsonl").file().toPath(),
             onWriteFailure = { error -> Logger.error("Failed to write round history: ${error.message}") },
             asyncWrites = true,
         )
+    }
+
+    private val playerActions by lazy {
+        PlayerActionRecorder(
+            logFile = Vars.dataDirectory.child("plague").child("player-actions.jsonl").file().toPath(),
+            onWriteFailure = { error -> Logger.error("Failed to write player action log: ${error.message}") },
+            asyncWrites = true,
+        )
+    }
+
+    private val playerActionsDisabledFile by lazy {
+        Vars.dataDirectory.child("plague").child("player-actions.disabled")
     }
 
     private val activePlagueAttackerUnits = mutableListOf<mindustry.gen.Unit>()
@@ -158,6 +173,64 @@ class PlagueHandler : Handler {
         team == Team.malis -> RoundSide.PLAGUE
         isValidSurvivorTeam(team) -> RoundSide.SURVIVORS
         else -> RoundSide.OTHER
+    }
+
+    private fun samplePlayerActions() {
+        val nowMillis = System.currentTimeMillis()
+        if (!PlayerActionSamplingRules.shouldSample(nowMillis, lastPlayerActionSampleMillis)) return
+        lastPlayerActionSampleMillis = nowMillis
+        if (playerActionsDisabledFile.exists()) return
+        val activeRoundId = roundHistory.currentRoundId()
+        val map = Vars.state.map.plainName()
+        Groups.player.forEach { player ->
+            val unit = player.unit()
+            playerActions.recordMotion(
+                PlayerMotionSnapshot(
+                    roundId = activeRoundId,
+                    map = map,
+                    playerName = player.plainName(),
+                    side = roundSideFor(player.team()),
+                    x = player.x,
+                    y = player.y,
+                    aimX = player.mouseX,
+                    aimY = player.mouseY,
+                    shooting = player.shooting,
+                    boosting = player.boosting,
+                    unitType = unit?.type?.name,
+                )
+            )
+        }
+    }
+
+    private fun recordPlayerAction(
+        player: Player,
+        actionType: String,
+        tile: Tile? = null,
+        block: String? = null,
+        item: String? = null,
+        amount: Int? = null,
+        unitType: String? = player.unit()?.type?.name,
+        command: String? = null,
+    ) {
+        if (playerActionsDisabledFile.exists()) return
+        playerActions.recordAction(
+            PlayerGameplayAction(
+                roundId = roundHistory.currentRoundId(),
+                map = Vars.state.map.plainName(),
+                playerName = player.plainName(),
+                side = roundSideFor(player.team()),
+                actionType = actionType,
+                x = player.x,
+                y = player.y,
+                tileX = tile?.x?.toInt(),
+                tileY = tile?.y?.toInt(),
+                block = block,
+                item = item,
+                amount = amount,
+                unitType = unitType,
+                command = command,
+            )
+        )
     }
 
     private fun registerRoleChoiceMenu() {
@@ -268,6 +341,20 @@ class PlagueHandler : Handler {
 
         if (action.player.team() == Team.blue) return false
 
+        return true
+    }
+
+    @Filter(FilterType.Action, Priority.VeryLow)
+    fun unitCommandActionLogFilter(action: Administration.PlayerAction): Boolean {
+        if (action.type != ActionType.commandUnits) return true
+        val player = action.player ?: return true
+        recordPlayerAction(
+            player = player,
+            actionType = "command_units",
+            amount = action.unitIDs?.size,
+            unitType = null,
+            command = action.unitCommand?.name ?: "target",
+        )
         return true
     }
 
@@ -1058,11 +1145,18 @@ class PlagueHandler : Handler {
 
     @EventHandler(true)
     suspend fun createSurvivorCoreEventHandler(event: EventType.BuildSelectEvent) {
-        if (event.builder.player == null) return
+        val player = event.builder.player ?: return
         if (event.builder.team() != Team.blue) return
         if (event.breaking) return
 
-        createSurvivorCore(event.builder.player, event.tile, SurvivorCreationSource.BUILD)
+        val constructRecipeName = (event.tile.build as? ConstructBuild)?.current?.name
+        recordPlayerAction(
+            player,
+            "build_select",
+            event.tile,
+            block = PlayerActionSamplingRules.selectedBlockName(constructRecipeName, event.tile.block().name),
+        )
+        createSurvivorCore(player, event.tile, SurvivorCreationSource.BUILD)
     }
 
     private suspend fun createSurvivorCore(
@@ -1324,12 +1418,98 @@ class PlagueHandler : Handler {
     }
 
     @EventHandler(true)
+    fun onPlayerTapForActionLog(event: EventType.TapEvent) {
+        recordPlayerAction(event.player, "tap", event.tile, block = event.tile.block().name)
+    }
+
+    @EventHandler(true)
+    fun onBuildSelectionForActionLog(event: EventType.BuildSelectEvent) {
+        val player = event.builder.player ?: return
+        if (!PlayerActionSamplingRules.shouldGeneralHandlerRecordBuildSelection(
+                isBlueTeam = event.builder.team() == Team.blue,
+                breaking = event.breaking,
+            )
+        ) return
+        val constructRecipeName = (event.tile.build as? ConstructBuild)?.current?.name
+        recordPlayerAction(
+            player,
+            if (event.breaking) "break_select" else "build_select",
+            event.tile,
+            block = PlayerActionSamplingRules.selectedBlockName(constructRecipeName, event.tile.block().name),
+        )
+    }
+
+    @EventHandler(true)
+    fun onBuildCompletedForActionLog(event: EventType.BlockBuildEndEvent) {
+        val player = event.unit?.player ?: return
+        recordPlayerAction(
+            player,
+            if (event.breaking) "break_complete" else "build_complete",
+            event.tile,
+            block = event.tile.block().name,
+        )
+    }
+
+    @EventHandler(true)
+    fun onConfigurationForActionLog(event: EventType.ConfigEvent) {
+        val player = event.player ?: return
+        recordPlayerAction(player, "configure", event.tile.tile, block = event.tile.block.name)
+    }
+
+    @EventHandler(true)
+    fun onWithdrawForActionLog(event: EventType.WithdrawEvent) {
+        recordPlayerAction(
+            event.player,
+            "withdraw_item",
+            event.tile.tile,
+            block = event.tile.block.name,
+            item = event.item.name,
+            amount = event.amount,
+        )
+    }
+
+    @EventHandler(true)
+    fun onDepositForActionLog(event: EventType.DepositEvent) {
+        recordPlayerAction(
+            event.player,
+            "deposit_item",
+            event.tile.tile,
+            block = event.tile.block.name,
+            item = event.item.name,
+            amount = event.amount,
+        )
+    }
+
+    @EventHandler(true)
+    fun onUnitControlForActionLog(event: EventType.UnitControlEvent) {
+        recordPlayerAction(event.player, "unit_control", unitType = event.unit?.type?.name)
+    }
+
+    @EventHandler(true)
+    fun onBuildRotationForActionLog(event: EventType.BuildRotateEvent) {
+        val player = event.unit?.player ?: return
+        recordPlayerAction(player, "rotate_building", event.build.tile, block = event.build.block.name)
+    }
+
+    @EventHandler(true)
+    fun onBuildingCommandForActionLog(event: EventType.BuildingCommandEvent) {
+        recordPlayerAction(
+            event.player,
+            "command_building",
+            event.building.tile,
+            block = event.building.block.name,
+        )
+    }
+
+    @EventHandler(true)
     @EventHandlerTrigger(Trigger.update)
     suspend fun onUpdate() {
         val plagueBannedUnits = PlagueBanned.getCurrentPlagueBannedUnits(false)
         val survivorsBannedUnits = PlagueBanned.getCurrentSurvivorsBannedUnits(false)
 
         if (Vars.state.gameOver) return
+
+        samplePlayerActions()
 
         val currentRoundSecond = PlagueVars.mapTime.inWholeSeconds
         if (lastRoundHistorySampleSecond != currentRoundSecond) {
@@ -1437,6 +1617,7 @@ class PlagueHandler : Handler {
             registerRoleChoiceMenu()
             lastMinuteUpdatesInMapTimeMinute = -1
             lastRoundHistorySampleSecond = -1
+            lastPlayerActionSampleMillis = 0
             cornerSearchComplete = false
             cachedSafeCornerTilePosition = null
 
@@ -1476,6 +1657,7 @@ class PlagueHandler : Handler {
 
     @EventHandler(true)
     fun onPlayerLeave(event: EventType.PlayerLeave) {
+        recordPlayerAction(event.player, "leave")
         event.player.con?.let { connection ->
             pendingRoleChoices.cancel(event.player.uuid(), event.player, connection)
             completedRoleChoices.cancel(event.player.uuid(), event.player, connection)
@@ -1540,6 +1722,7 @@ class PlagueHandler : Handler {
             roleChoiceMapGeneration.incrementAndGet()
             lastMinuteUpdatesInMapTimeMinute = -1
             lastRoundHistorySampleSecond = -1
+            lastPlayerActionSampleMillis = 0
             cornerSearchComplete = false
             cachedSafeCornerTilePosition = null
 
@@ -1699,6 +1882,7 @@ class PlagueHandler : Handler {
      */
     @EventHandler(true)
     fun onPlayerConnectionConfirmed(event: EventType.PlayerConnectionConfirmed) {
+        recordPlayerAction(event.player, "join")
         runBlocking {
             if (event.player.dead()) {
                 val shouldCreateFirstSurvivor = PlagueVars.stateLock.withLock {

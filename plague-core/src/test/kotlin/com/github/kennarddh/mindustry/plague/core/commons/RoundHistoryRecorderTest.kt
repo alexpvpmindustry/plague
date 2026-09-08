@@ -9,6 +9,22 @@ import kotlin.test.assertTrue
 
 class RoundHistoryRecorderTest {
     @Test
+    fun `current round id is available only while a round is active`() {
+        val historyFile = Files.createTempDirectory("plague-round-id-test").resolve("round-history.jsonl")
+        val recorder = RoundHistoryRecorder(historyFile = historyFile, roundId = { "round-actions" })
+
+        assertEquals(null, recorder.currentRoundId())
+        recorder.startRound("Simplexbeans")
+        assertEquals("round-actions", recorder.currentRoundId())
+        recorder.completeRound(
+            winner = RoundSide.PLAGUE,
+            reason = RoundEndReason.NO_SURVIVORS,
+            endPlayers = RoundPlayerCounts(1, 0, 0),
+        )
+        assertEquals(null, recorder.currentRoundId())
+    }
+
+    @Test
     fun `background writer retries after storage recovers without blocking caller`() {
         val root = Files.createTempDirectory("plague-round-history-async-test")
         val historyDirectory = root.resolve("history")
